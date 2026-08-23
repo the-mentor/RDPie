@@ -28,3 +28,4 @@ pub use display::{RdpieDisplay, RdpieDisplayUpdates};
 pub mod server;
 
 pub use server::{ServerConfig, run};
+pub mod ffi;
