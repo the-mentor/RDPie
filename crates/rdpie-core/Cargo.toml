@@ -11,13 +11,14 @@ name = "rdpie_core"
 crate-type = ["rlib", "staticlib"]
 
 [dependencies]
-ironrdp-server = "0.13"
+ironrdp-server = { version = "0.13", features = ["helper"] }
 anyhow = "1"
 async-trait = "0.1"
 tokio = { version = "1", features = ["rt-multi-thread", "net", "sync", "time", "macros"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 bytes = "1"
+tokio-rustls = "0.26"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full"] }
