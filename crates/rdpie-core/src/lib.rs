@@ -22,3 +22,6 @@ mod tests {
 pub mod frame;
 
 pub use frame::{Frame, FrameSink, FrameStream, SubmitOutcome};
+pub mod display;
+
+pub use display::{RdpieDisplay, RdpieDisplayUpdates};
