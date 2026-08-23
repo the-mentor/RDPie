@@ -174,10 +174,10 @@ pub unsafe extern "C" fn rdpie_server_stop(server: *mut RdpieServer) {
     if let Some(shutdown) = server.shutdown.take() {
         let _ = shutdown.send(());
     }
-    if let Some(worker) = server.worker.take() {
-        if worker.join().is_err() {
-            tracing::error!("the RDPie server thread panicked");
-        }
+    if let Some(worker) = server.worker.take()
+        && worker.join().is_err()
+    {
+        tracing::error!("the RDPie server thread panicked");
     }
 }
 
