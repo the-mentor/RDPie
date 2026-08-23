@@ -1,0 +1,13 @@
+[workspace]
+resolver = "3"
+members = ["crates/rdpie-core"]
+exclude = ["third_party"]
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.94"
+license = "MIT"
+repository = "https://github.com/the-mentor/RDPie"
+
+[patch.crates-io]
+ironrdp-server = { path = "third_party/ironrdp/crates/ironrdp-server" }
