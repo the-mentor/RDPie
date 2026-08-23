@@ -18,3 +18,7 @@ mod tests {
         assert_eq!(size.height, 1080);
     }
 }
+
+pub mod frame;
+
+pub use frame::{Frame, FrameSink, FrameStream, SubmitOutcome};
