@@ -32,3 +32,6 @@ pub mod ffi;
 pub mod gfx;
 
 pub use gfx::{RdpieGfxFactory, RdpieGfxHandle, gfx_channel};
+pub mod input;
+
+pub use input::{RdpieInputCallback, RdpieInputEvent, RdpieInputEventKind, RdpieInputHandler};
