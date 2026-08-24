@@ -37,10 +37,22 @@ signal(SIGINT) { _ in exit(0) }
 print("rdpied listening on 127.0.0.1:3389 — connect with an RDP client")
 
 var h264Encoder: H264Encoder?
+var wasGfxActive = false
 let encoderClockStart = DispatchTime.now()
 
 for await frame in source.frames {
-    if bridge.isGfxActive() {
+    let gfxActive = bridge.isGfxActive()
+    if gfxActive && !wasGfxActive {
+        // A fresh EGFX channel (first connection, or a reconnect) means the
+        // client's decoder has no state. Discard the encoder so the next
+        // frame lazily creates a new `VTCompressionSession`, whose first
+        // output is always a keyframe carrying SPS/PPS — resuming the old
+        // session would emit a P-frame the new client can't decode.
+        h264Encoder = nil
+    }
+    wasGfxActive = gfxActive
+
+    if gfxActive {
         let encoder: H264Encoder
         if let existing = h264Encoder {
             encoder = existing
