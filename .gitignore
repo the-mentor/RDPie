@@ -7,3 +7,4 @@ spikes/tcc-attribution/.build/
 spikes/tcc-attribution/build/
 macos/cert.pem
 macos/key.pem
+spikes/videotoolbox-h264/vtprobe
