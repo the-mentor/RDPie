@@ -38,8 +38,24 @@ keyUp?.post(tap: .cghidEventTap)
 print("Posted keyDown+keyUp for 'A'. Check whether it appeared wherever focus was.")
 
 // Also probe mouse move, since RDP mouse events need CGEventPost too.
-print("Waiting 2s, then moving the mouse cursor to (100, 100).")
+// Verify programmatically by reading the cursor position back, rather than
+// relying on a human spotting a small jump.
+func currentCursorLocation() -> CGPoint? {
+    CGEvent(source: nil)?.location
+}
+
+print("Cursor location before move: \(String(describing: currentCursorLocation()))")
+print("Waiting 2s, then moving the mouse cursor to (600, 400).")
 try? await Task.sleep(nanoseconds: 2_000_000_000)
-let moveEvent = CGEvent(mouseEventSource: source, mouseType: .mouseMoved, mouseCursorPosition: CGPoint(x: 100, y: 100), mouseButton: .left)
+let target = CGPoint(x: 600, y: 400)
+let moveEvent = CGEvent(mouseEventSource: source, mouseType: .mouseMoved, mouseCursorPosition: target, mouseButton: .left)
 moveEvent?.post(tap: .cghidEventTap)
-print("Posted a mouse-move event to (100, 100). Check whether the cursor actually moved.")
+
+try? await Task.sleep(nanoseconds: 200_000_000)
+let after = currentCursorLocation()
+print("Cursor location after move: \(String(describing: after))")
+if let after, abs(after.x - target.x) < 2, abs(after.y - target.y) < 2 {
+    print("MOUSE MOVE CONFIRMED: cursor position matches the posted target.")
+} else {
+    print("MOUSE MOVE NOT CONFIRMED: cursor position does not match the target.")
+}
