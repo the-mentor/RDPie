@@ -32,7 +32,12 @@ final class RustBridge {
                             username: user,
                             password: pass,
                             cert_pem_path: cert,
-                            key_pem_path: key
+                            key_pem_path: key,
+                            // A null callback means view-only, per the FFI
+                            // contract — real wiring lands with InputInjector
+                            // integration, not here.
+                            input_callback: nil,
+                            input_context: nil
                         )
                         guard let handle = rdpie_server_start(&config) else {
                             throw BridgeError.serverFailedToStart
