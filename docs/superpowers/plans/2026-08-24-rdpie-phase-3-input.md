@@ -2157,7 +2157,6 @@ behind an env var nobody sets by accident, default behavior unchanged.
 **Files:**
 - Modify: `crates/rdpie-core/src/server.rs`
 - Modify: `crates/rdpie-core/src/ffi.rs`
-- Modify: `crates/rdpie-core/cbindgen.toml` (no allowlist change needed — `bind_all` is a field on the already-exported `RdpieConfig`, not a new type)
 - Modify: `crates/rdpie-core/include/rdpie_core.h`
 - Modify: `macos/Sources/rdpied/RustBridge.swift`
 - Modify: `macos/Sources/rdpied/main.swift`
