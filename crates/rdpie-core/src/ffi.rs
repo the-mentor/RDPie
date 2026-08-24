@@ -89,6 +89,7 @@ pub unsafe extern "C" fn rdpie_server_start(config: *const RdpieConfig) -> *mut 
     );
 
     let (sink, stream) = crate::frame::channel(3);
+    let (gfx_factory, _gfx) = crate::gfx::gfx_channel(config.width, config.height);
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
 
     let worker = std::thread::Builder::new()
@@ -103,7 +104,7 @@ pub unsafe extern "C" fn rdpie_server_start(config: *const RdpieConfig) -> *mut 
             };
             runtime.block_on(async move {
                 tokio::select! {
-                    result = crate::server::run(server_config, stream) => {
+                    result = crate::server::run(server_config, stream, gfx_factory) => {
                         if let Err(error) = result {
                             tracing::error!(%error, "RDP server stopped");
                         }
