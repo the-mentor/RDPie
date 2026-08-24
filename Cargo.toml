@@ -11,3 +11,6 @@ repository = "https://github.com/the-mentor/RDPie"
 
 [patch.crates-io]
 ironrdp-server = { path = "third_party/ironrdp/crates/ironrdp-server" }
+ironrdp-egfx = { path = "third_party/ironrdp/crates/ironrdp-egfx" }
+ironrdp-dvc = { path = "third_party/ironrdp/crates/ironrdp-dvc" }
+ironrdp-svc = { path = "third_party/ironrdp/crates/ironrdp-svc" }
