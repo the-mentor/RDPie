@@ -36,15 +36,17 @@ RDPIE_PASSWORD=<password> RDPIE_USERNAME=<username> RDPIE_BIND_ALL=1 RUST_LOG=de
 
 ## Verification checklist for a live pass
 
-- [ ] Connect from Windows' native Remote Desktop Connection (`mstsc`). A
+- [x] Connect from Windows' native Remote Desktop Connection (`mstsc`). A
       Windows Security credential prompt should appear *before* the RDP
       handshake proceeds — that's the tell CredSSP is actually being
       offered, not falling back to plain TLS. Enter the RDPie
-      username/password there.
+      username/password there. Confirmed live: the prompt appeared,
+      RDPie's credentials were accepted, and the session came up showing
+      the real desktop.
 - [ ] Confirm a wrong password is rejected (no session established).
-- [ ] Confirm the right password connects successfully and the session
-      behaves as it did before this change (display, input, EGFX all
-      still work — this change only touches the security/auth layer).
+- [x] Confirm the right password connects successfully and the session
+      behaves as it did before this change (display works — confirmed
+      live; input/EGFX not re-verified in this pass).
 - [ ] Confirm a non-Windows client that was working before (e.g. the
       Android client from Phase 3 testing) still connects fine.
 
