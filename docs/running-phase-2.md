@@ -252,25 +252,88 @@ Phase 1 version).
   `Microsoft::Windows::RDS::DisplayControl` (channels 0 and 1) both
   created successfully, as did the EGFX channel (channel 3) itself.
 
+## Final-review fix wave — 2026-08-24
+
+The whole-branch review that closed out this plan found two further
+Important issues, both variants of the same failure mode reached by
+different routes, plus two minor items it explicitly recommended bundling
+into the same fix:
+
+- **EGFX ready state never reset on a mid-session channel close.**
+  `RdpieGfxHandler` (`crates/rdpie-core/src/gfx.rs`) implemented
+  `on_ready` but not the upstream `GraphicsPipelineHandler::on_close`
+  hook, so if a client closed the EGFX DVC channel mid-session, the
+  `ready` flag and `surface_id` never cleared — every subsequent
+  `rdpie_server_submit_h264_frame` call would silently fail forever,
+  freezing the screen for the rest of that connection with no error
+  surfaced anywhere. Fixed by implementing `on_close` to reset both,
+  following the same deadlock-avoidance rule already documented for
+  `on_ready` (never touch `state.handle` from inside a callback that
+  upstream invokes while already holding that mutex). Live-confirmed:
+  connecting, then disconnecting a client showed the new `EGFX channel
+  closed` log line firing and the ready flag actually clearing.
+- **The Swift `H264Encoder` was never reset across a disconnect/reconnect.**
+  A reconnecting client would resume an existing `VTCompressionSession`
+  mid-GOP — its next output is a P-frame with no SPS/PPS, undecodable by
+  a fresh client. Fixed in `main.swift` by detecting the `isGfxActive()`
+  false→true transition (not just the level) and discarding the encoder
+  on that edge, forcing a fresh session (and therefore a fresh keyframe)
+  on every new EGFX-negotiating connection. This could not be live-tested
+  through a full second connection in this pass — see the pre-existing
+  gap noted below — but is covered by the existing Swift unit suite and
+  by direct code inspection during re-review.
+- Two recommended minors, both applied: a bounds guard in
+  `rdpie_server_submit_h264_frame` rejecting any region that exceeds the
+  server's actual configured desktop size (the same class of bug fixed in
+  `705b8d4`, now caught at the boundary that owns the surface dimensions
+  rather than relying on the caller getting it right), and a
+  `tracing::debug!` on `submit_avc420_frame`'s success path so a future
+  investigation doesn't need to cross-reference two logs by hand.
+
+**Pre-existing gap found, not fixed (out of scope for Phase 2):**
+`RdpieDisplay::updates()` (`crates/rdpie-core/src/display.rs`) takes its
+`FrameStream` once via `.take()` and never restores it, so **any second
+RDP connection to a long-running `rdpied` process fails outright** with
+"display updates already taken," independent of EGFX entirely. This is
+Phase 1 code, not introduced by Phase 2, and is why the encoder-reset fix
+above couldn't be exercised through a full live second connection in this
+pass. Worth a dedicated fix in a follow-up phase — right now `rdpied`
+only ever serves one client per process lifetime.
+
+## Visual confirmation — 2026-08-24
+
+All verification up to this point used `SDL_VIDEODRIVER=dummy`, which
+proves the byte stream, socket state, and absence of decode errors, but
+never confirmed an actual rendered picture. Closing that gap: connected
+`sdl-freerdp` with a real, visible window (no dummy driver) against the
+real display, with EGFX/AVC420 negotiated. The rendered window showed a
+correct, live, recursively-nested mirror of the actual desktop —
+crisp readable text (window titles, terminal content, menu bar), correct
+colors, and no tearing, corruption, or geometry artifacts. Screenshot
+saved at `docs/phase-2-evidence/gfx-avc420-render.png`. This is direct
+visual proof of correctly decoded H.264 video, not just protocol-level
+success.
+
 ## Verdict against the Phase 2 exit criteria
 
 The third exit-criteria bullet — "An EGFX/AVC420-capable RDP client
 authenticates, negotiates the graphics pipeline, and renders decoded
 H.264 video from the Mac's screen over a loopback tunnel" — is **now
-met**, following the fix in `705b8d4`. This pass's original run showed
-authentication and pipeline negotiation succeeding (confirmed by the
-`on_ready` log line and the client's own `SUPPORT_DYN_VC_GFX_PROTOCOL`
-capability round-trip) but frame delivery failing outright — the one
-frame that reached the client failed to decode due to the off-by-one
-region-rectangle bug, closing the EGFX channel before any video reached
-the screen. With that bug fixed, the live re-verification described
-above confirms the channel stays open and frames flow continuously
-(~30-35ms cadence, sustained for ~35s, zero rejection/error/close lines
-in either log) — i.e., decoded H.264 video is now actually delivered to
-the client over the EGFX pipeline, closing the gap this document
-originally reported. The fourth bullet (non-EGFX clients keep the
-unmodified Phase 1 experience) was not directly re-verified in this pass
-either — this run only tested the `/gfx:AVC420` path — though nothing
-observed here suggests a regression to that path specifically, since the
-fix is confined to the AVC420 region-rectangle construction, code that a
-non-GFX client's session never calls.
+met**, following the fix in `705b8d4` and confirmed with direct visual
+evidence above (not just protocol-level success). This pass's original
+run showed authentication and pipeline negotiation succeeding (confirmed
+by the `on_ready` log line and the client's own
+`SUPPORT_DYN_VC_GFX_PROTOCOL` capability round-trip) but frame delivery
+failing outright — the one frame that reached the client failed to
+decode due to the off-by-one region-rectangle bug, closing the EGFX
+channel before any video reached the screen. With that bug fixed, the
+live re-verification described above confirms the channel stays open and
+frames flow continuously (~30-35ms cadence, sustained for ~35s, zero
+rejection/error/close lines in either log), and the visual-confirmation
+pass above confirms the delivered video is actually correct — not merely
+present. The fourth bullet (non-EGFX clients keep the unmodified Phase 1
+experience) was not directly re-verified in this pass either — every run
+in this document tested the `/gfx:AVC420` path — though nothing observed
+here suggests a regression to that path specifically, since every fix in
+this document is confined to EGFX/AVC420-specific code that a non-GFX
+client's session never calls.
