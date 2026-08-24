@@ -224,6 +224,12 @@ pub unsafe extern "C" fn rdpie_server_submit_h264_frame(
         return -1;
     }
     let server = unsafe { &*server };
+    let (width, height) = server.gfx.size();
+    // Inclusive edges: a region reaching all the way to the far edge equals
+    // width/height, so `>=` is out of bounds. See commit 705b8d4.
+    if region_right >= width || region_bottom >= height {
+        return -1;
+    }
     let bytes = unsafe { core::slice::from_raw_parts(data, len) };
     let region = ironrdp_egfx::pdu::Avc420Region::new(
         region_left,
