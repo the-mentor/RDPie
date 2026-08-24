@@ -36,8 +36,38 @@ try source.start(configuration: CaptureConfiguration(
 signal(SIGINT) { _ in exit(0) }
 print("rdpied listening on 127.0.0.1:3389 — connect with an RDP client")
 
+var h264Encoder: H264Encoder?
+let encoderClockStart = DispatchTime.now()
+
 for await frame in source.frames {
-    bridge.submit(frame)
+    if bridge.isGfxActive() {
+        let encoder: H264Encoder
+        if let existing = h264Encoder {
+            encoder = existing
+        } else {
+            do {
+                encoder = try H264Encoder(width: width, height: height)
+                h264Encoder = encoder
+            } catch {
+                FileHandle.standardError.write("H264Encoder creation failed: \(error)\n".data(using: .utf8)!)
+                bridge.submit(frame)
+                continue
+            }
+        }
+
+        let elapsedNs = DispatchTime.now().uptimeNanoseconds - encoderClockStart.uptimeNanoseconds
+        let timestampMs = UInt32(truncatingIfNeeded: elapsedNs / 1_000_000)
+
+        do {
+            if let encoded = try await encoder.encode(frame, timestampMs: timestampMs) {
+                bridge.submitH264(encoded, regionWidth: frame.width, regionHeight: frame.height)
+            }
+        } catch {
+            FileHandle.standardError.write("H.264 encode failed: \(error)\n".data(using: .utf8)!)
+        }
+    } else {
+        bridge.submit(frame)
+    }
 }
 
 source.stop()
