@@ -8,3 +8,6 @@ spikes/tcc-attribution/build/
 macos/cert.pem
 macos/key.pem
 spikes/videotoolbox-h264/vtprobe
+spikes/pam-auth/pam-probe
+spikes/pam-auth/pam-bridge.o
+spikes/cgevent-injection/cgevent-probe
