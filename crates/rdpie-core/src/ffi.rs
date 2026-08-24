@@ -12,6 +12,7 @@ use crate::frame::{Frame, FrameSink, SubmitOutcome};
 /// drives the server with `block_on`, which carries no `Send` bound.
 pub struct RdpieServer {
     pub(crate) sink: FrameSink,
+    pub(crate) gfx: crate::gfx::RdpieGfxHandle,
     pub(crate) shutdown: Option<tokio::sync::oneshot::Sender<()>>,
     pub(crate) worker: Option<std::thread::JoinHandle<()>>,
 }
@@ -89,7 +90,7 @@ pub unsafe extern "C" fn rdpie_server_start(config: *const RdpieConfig) -> *mut 
     );
 
     let (sink, stream) = crate::frame::channel(3);
-    let (gfx_factory, _gfx) = crate::gfx::gfx_channel(config.width, config.height);
+    let (gfx_factory, gfx) = crate::gfx::gfx_channel(config.width, config.height);
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
 
     let worker = std::thread::Builder::new()
@@ -126,6 +127,7 @@ pub unsafe extern "C" fn rdpie_server_start(config: *const RdpieConfig) -> *mut 
 
     Box::into_raw(Box::new(RdpieServer {
         sink,
+        gfx,
         shutdown: Some(shutdown_tx),
         worker: Some(worker),
     }))
@@ -164,6 +166,77 @@ pub unsafe extern "C" fn rdpie_server_submit_frame(
         SubmitOutcome::Accepted => 0,
         SubmitOutcome::DroppedOldest => 1,
         SubmitOutcome::Closed => -1,
+    }
+}
+
+/// Whether the connected client has finished EGFX/AVC420 capability
+/// negotiation. Swift should submit H.264 via
+/// `rdpie_server_submit_h264_frame` once this returns `true`, and fall back
+/// to raw BGRA via `rdpie_server_submit_frame` otherwise — the two paths
+/// coexist; this never disables the raw path.
+///
+/// Returns `false` for a null handle.
+///
+/// # Safety
+///
+/// `server` must be a handle from `rdpie_server_start` that has not been
+/// stopped, or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rdpie_server_gfx_active(server: *const RdpieServer) -> bool {
+    if server.is_null() {
+        return false;
+    }
+    let server = unsafe { &*server };
+    server.gfx.is_ready()
+}
+
+/// Submit one AVC420-encoded H.264 frame covering a single full-frame
+/// region (`region_left`/`region_top`/`region_right`/`region_bottom` are
+/// inclusive edges, matching MS-RDPEGFX). `data` must already be Annex-B
+/// formatted (start-code-prefixed NAL units) — VideoToolbox's AVCC output
+/// needs converting to Annex-B before calling this, which happens on the
+/// Swift side, not here.
+///
+/// Returns 0 on success, -1 on invalid arguments or a rejected frame
+/// (channel not negotiated yet, backpressure, or an encoding failure).
+/// Multi-region submission is not supported in this phase.
+///
+/// # Safety
+///
+/// `server` must be a handle from `rdpie_server_start` that has not been
+/// stopped. `data` must point to at least `len` readable bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rdpie_server_submit_h264_frame(
+    server: *mut RdpieServer,
+    data: *const u8,
+    len: usize,
+    region_left: u16,
+    region_top: u16,
+    region_right: u16,
+    region_bottom: u16,
+    quantization_parameter: u8,
+    timestamp_ms: u32,
+) -> i32 {
+    if server.is_null() || data.is_null() || len == 0 {
+        return -1;
+    }
+    if region_right < region_left || region_bottom < region_top || quantization_parameter > 51 {
+        return -1;
+    }
+    let server = unsafe { &*server };
+    let bytes = unsafe { core::slice::from_raw_parts(data, len) };
+    let region = ironrdp_egfx::pdu::Avc420Region::new(
+        region_left,
+        region_top,
+        region_right,
+        region_bottom,
+        quantization_parameter,
+        100, // quality: not exposed over FFI in this phase; 100 matches Avc420Region::full_frame's default
+    );
+    if server.gfx.submit_avc420_frame(bytes, core::slice::from_ref(&region), timestamp_ms) {
+        0
+    } else {
+        -1
     }
 }
 
@@ -206,7 +279,8 @@ mod tests {
     #[test]
     fn submitting_a_null_buffer_is_an_error_not_a_crash() {
         let (sink, _stream) = crate::frame::channel(2);
-        let mut server = RdpieServer { sink, shutdown: None, worker: None };
+        let (_factory, gfx) = crate::gfx::gfx_channel(2, 2);
+        let mut server = RdpieServer { sink, gfx, shutdown: None, worker: None };
         let rc = unsafe {
             rdpie_server_submit_frame(&mut server as *mut _, 2, 2, 8, core::ptr::null(), 16)
         };
@@ -216,7 +290,8 @@ mod tests {
     #[test]
     fn submitting_a_short_buffer_is_an_error_not_a_crash() {
         let (sink, _stream) = crate::frame::channel(2);
-        let mut server = RdpieServer { sink, shutdown: None, worker: None };
+        let (_factory, gfx) = crate::gfx::gfx_channel(2, 2);
+        let mut server = RdpieServer { sink, gfx, shutdown: None, worker: None };
         let data = [0u8; 4]; // claims 2x2 stride 8 == 16 bytes, supplies 4
         let rc = unsafe {
             rdpie_server_submit_frame(&mut server as *mut _, 2, 2, 8, data.as_ptr(), data.len())
@@ -227,7 +302,8 @@ mod tests {
     #[test]
     fn a_valid_frame_is_accepted() {
         let (sink, _stream) = crate::frame::channel(2);
-        let mut server = RdpieServer { sink, shutdown: None, worker: None };
+        let (_factory, gfx) = crate::gfx::gfx_channel(2, 2);
+        let mut server = RdpieServer { sink, gfx, shutdown: None, worker: None };
         let data = [0u8; 16];
         let rc = unsafe {
             rdpie_server_submit_frame(&mut server as *mut _, 2, 2, 8, data.as_ptr(), data.len())
@@ -238,5 +314,85 @@ mod tests {
     #[test]
     fn stopping_a_null_server_is_a_no_op() {
         unsafe { rdpie_server_stop(core::ptr::null_mut()) };
+    }
+
+    #[test]
+    fn gfx_active_on_a_null_server_is_false_not_a_crash() {
+        assert!(!unsafe { rdpie_server_gfx_active(core::ptr::null()) });
+    }
+
+    #[test]
+    fn gfx_active_before_a_client_negotiates_is_false() {
+        let (sink, _stream) = crate::frame::channel(2);
+        let (_factory, gfx) = crate::gfx::gfx_channel(2, 2);
+        let server = RdpieServer { sink, gfx, shutdown: None, worker: None };
+        assert!(!unsafe { rdpie_server_gfx_active(&server as *const _) });
+    }
+
+    #[test]
+    fn submitting_h264_to_a_null_server_is_an_error_not_a_crash() {
+        let data = [0u8; 4];
+        let rc = unsafe {
+            rdpie_server_submit_h264_frame(
+                core::ptr::null_mut(), data.as_ptr(), data.len(), 0, 0, 1, 1, 26, 0,
+            )
+        };
+        assert_eq!(rc, -1);
+    }
+
+    #[test]
+    fn submitting_a_null_h264_buffer_is_an_error_not_a_crash() {
+        let (sink, _stream) = crate::frame::channel(2);
+        let (_factory, gfx) = crate::gfx::gfx_channel(2, 2);
+        let mut server = RdpieServer { sink, gfx, shutdown: None, worker: None };
+        let rc = unsafe {
+            rdpie_server_submit_h264_frame(
+                &mut server as *mut _, core::ptr::null(), 4, 0, 0, 1, 1, 26, 0,
+            )
+        };
+        assert_eq!(rc, -1);
+    }
+
+    #[test]
+    fn submitting_an_empty_h264_buffer_is_an_error_not_a_crash() {
+        let (sink, _stream) = crate::frame::channel(2);
+        let (_factory, gfx) = crate::gfx::gfx_channel(2, 2);
+        let mut server = RdpieServer { sink, gfx, shutdown: None, worker: None };
+        let data = [0u8; 1];
+        let rc = unsafe {
+            rdpie_server_submit_h264_frame(
+                &mut server as *mut _, data.as_ptr(), 0, 0, 0, 1, 1, 26, 0,
+            )
+        };
+        assert_eq!(rc, -1);
+    }
+
+    #[test]
+    fn submitting_an_inverted_region_is_an_error_not_a_crash() {
+        let (sink, _stream) = crate::frame::channel(2);
+        let (_factory, gfx) = crate::gfx::gfx_channel(2, 2);
+        let mut server = RdpieServer { sink, gfx, shutdown: None, worker: None };
+        let data = [0u8; 4];
+        // right < left is nonsensical and must be rejected before it reaches the encoder.
+        let rc = unsafe {
+            rdpie_server_submit_h264_frame(
+                &mut server as *mut _, data.as_ptr(), data.len(), 5, 0, 1, 1, 26, 0,
+            )
+        };
+        assert_eq!(rc, -1);
+    }
+
+    #[test]
+    fn submitting_h264_before_the_client_negotiates_egfx_is_rejected_not_a_crash() {
+        let (sink, _stream) = crate::frame::channel(2);
+        let (_factory, gfx) = crate::gfx::gfx_channel(2, 2);
+        let mut server = RdpieServer { sink, gfx, shutdown: None, worker: None };
+        let data = [0u8; 4];
+        let rc = unsafe {
+            rdpie_server_submit_h264_frame(
+                &mut server as *mut _, data.as_ptr(), data.len(), 0, 0, 1, 1, 26, 0,
+            )
+        };
+        assert_eq!(rc, -1); // RdpieGfxHandle::submit_avc420_frame returns false: not ready yet
     }
 }
