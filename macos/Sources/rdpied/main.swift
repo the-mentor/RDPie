@@ -25,6 +25,13 @@ if !useSynthetic && !ScreenCaptureKitSource.hasPermission() {
     exit(3)
 }
 
+if !InputInjector.hasAccessibilityPermission() {
+    FileHandle.standardError.write(
+        "Accessibility permission is required for input control. Grant it in System Settings › Privacy & Security › Accessibility, then run again.\n"
+            .data(using: .utf8)!)
+    exit(4)
+}
+
 let bridge = RustBridge()
 try bridge.start(port: 3389, width: width, height: height,
                  username: username, password: password,
@@ -54,9 +61,23 @@ func freshH264Encoder() -> H264Encoder? {
 
 var h264Encoder = freshH264Encoder()
 var wasGfxActive = false
+var wasAccessibilityGranted = true // Step 3's check already required this true to get here
 let encoderClockStart = DispatchTime.now()
 
 for await frame in source.frames {
+    let accessibilityGranted = InputInjector.hasAccessibilityPermission()
+    if wasAccessibilityGranted && !accessibilityGranted {
+        // Global Constraint: downgrade to view-only, don't tear down the
+        // connection. `InputInjector.handle` already drops every event on
+        // its own when this happens — nothing here needs to touch
+        // `source`/`bridge` — this line exists purely so a revocation is
+        // visible in the log instead of silently going unnoticed.
+        FileHandle.standardError.write(
+            "Accessibility permission revoked — continuing in view-only mode.\n"
+                .data(using: .utf8)!)
+    }
+    wasAccessibilityGranted = accessibilityGranted
+
     let gfxActive = bridge.isGfxActive()
     if wasGfxActive && !gfxActive {
         // The connection that was using `h264Encoder` just ended (EGFX
