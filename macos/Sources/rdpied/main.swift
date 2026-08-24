@@ -13,6 +13,7 @@ let username = ProcessInfo.processInfo.environment["RDPIE_USERNAME"] ?? "rdpie"
 let useSynthetic = ProcessInfo.processInfo.environment["RDPIE_SYNTHETIC"] == "1"
 let certPath = ProcessInfo.processInfo.environment["RDPIE_CERT"] ?? "./cert.pem"
 let keyPath = ProcessInfo.processInfo.environment["RDPIE_KEY"] ?? "./key.pem"
+let bindAll = ProcessInfo.processInfo.environment["RDPIE_BIND_ALL"] == "1"
 
 let width = 1280, height = 720
 
@@ -35,7 +36,7 @@ if !InputInjector.hasAccessibilityPermission() {
 let bridge = RustBridge()
 try bridge.start(port: 3389, width: width, height: height,
                  username: username, password: password,
-                 certPath: certPath, keyPath: keyPath)
+                 certPath: certPath, keyPath: keyPath, bindAll: bindAll)
 
 try source.start(configuration: CaptureConfiguration(
     width: width, height: height, framesPerSecond: 30))

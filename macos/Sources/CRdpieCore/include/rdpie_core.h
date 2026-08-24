@@ -105,6 +105,11 @@ typedef struct RdpieConfig {
    * Ignored when `input_callback` is `None`.
    */
   void *input_context;
+  /**
+   * See `ServerConfig::new`. `false` unless the caller has deliberately
+   * opted in — matches spec section 8.5's loopback-by-default mandate.
+   */
+  bool bind_all;
 } RdpieConfig;
 
 /**

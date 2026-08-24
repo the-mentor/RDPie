@@ -26,18 +26,27 @@ pub struct ServerConfig {
 }
 
 impl ServerConfig {
-    /// Bind to loopback. Spec section 8.5 makes this the only safe default;
-    /// widening the listener is a deliberate act, not a convenience.
-    pub fn loopback(
+    /// Binds to loopback unless `bind_all` is set, in which case it binds
+    /// the unspecified address (all interfaces). Spec section 8.5 makes
+    /// loopback the only safe default; `bind_all` is the explicit opt-in
+    /// section 8.5 calls for, not a convenience — callers set it from an
+    /// explicit environment variable, never implicitly.
+    pub fn new(
         port: u16,
+        bind_all: bool,
         size: DesktopSize,
         username: String,
         password: String,
         cert_pem: PathBuf,
         key_pem: PathBuf,
     ) -> Self {
+        let bind_ip = if bind_all {
+            IpAddr::V4(Ipv4Addr::UNSPECIFIED)
+        } else {
+            IpAddr::V4(Ipv4Addr::LOCALHOST)
+        };
         Self {
-            bind: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
+            bind: SocketAddr::new(bind_ip, port),
             size,
             username,
             password,
@@ -107,8 +116,9 @@ mod tests {
     use super::ServerConfig;
 
     fn config() -> ServerConfig {
-        ServerConfig::loopback(
+        ServerConfig::new(
             3389,
+            false,
             DesktopSize { width: 1280, height: 720 },
             "rdpie".to_owned(),
             "hunter2".to_owned(),
@@ -129,5 +139,20 @@ mod tests {
         let creds = config().credentials();
         assert_eq!(creds.username, "rdpie");
         assert_eq!(creds.password, "hunter2");
+    }
+
+    #[test]
+    fn bind_all_true_binds_to_the_unspecified_address() {
+        let config = ServerConfig::new(
+            3389,
+            true,
+            DesktopSize { width: 1280, height: 720 },
+            "rdpie".to_owned(),
+            "hunter2".to_owned(),
+            PathBuf::from("/tmp/cert.pem"),
+            PathBuf::from("/tmp/key.pem"),
+        );
+        assert_eq!(config.bind.ip(), IpAddr::V4(Ipv4Addr::UNSPECIFIED));
+        assert_eq!(config.bind.port(), 3389);
     }
 }

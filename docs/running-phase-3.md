@@ -43,6 +43,22 @@ frames keep flowing, input events are silently dropped, and a
 appears on stderr once, on the frame where the revocation is first
 observed.
 
+### Testing from a real RDP client, not just loopback
+
+By default `rdpied` only accepts connections from the same machine (spec
+section 8.5's mandated default). To test input from an actual device on
+your network:
+
+```sh
+RDPIE_PASSWORD=hunter2 RDPIE_BIND_ALL=1 just run
+```
+
+This binds all interfaces, not just loopback. Do not do this on a network
+you don't trust, and never expose port 3389 directly to the internet — see
+the top-level README's network-exposure warning (VPN/Tailscale/SSH tunnel
+for anything beyond a trusted LAN). Omit `RDPIE_BIND_ALL` (or set it to
+anything other than `1`) to stay loopback-only.
+
 ## Verification checklist for a live pass
 
 - [ ] Connect with an RDP client and confirm keyboard input (a plain

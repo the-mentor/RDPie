@@ -44,7 +44,7 @@ final class RustBridge {
 
     func start(port: UInt16, width: Int, height: Int,
                username: String, password: String,
-               certPath: String, keyPath: String) throws {
+               certPath: String, keyPath: String, bindAll: Bool = false) throws {
         try username.withCString { user in
             try password.withCString { pass in
                 try certPath.withCString { cert in
@@ -58,7 +58,8 @@ final class RustBridge {
                             cert_pem_path: cert,
                             key_pem_path: key,
                             input_callback: rdpieHandleInputEvent,
-                            input_context: Unmanaged.passUnretained(self).toOpaque()
+                            input_context: Unmanaged.passUnretained(self).toOpaque(),
+                            bind_all: bindAll
                         )
                         guard let handle = rdpie_server_start(&config) else {
                             throw BridgeError.serverFailedToStart

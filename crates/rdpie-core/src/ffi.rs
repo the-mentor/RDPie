@@ -50,6 +50,9 @@ pub struct RdpieConfig {
     /// Opaque; passed back unchanged on every `input_callback` invocation.
     /// Ignored when `input_callback` is `None`.
     pub input_context: *mut c_void,
+    /// See `ServerConfig::new`. `false` unless the caller has deliberately
+    /// opted in — matches spec section 8.5's loopback-by-default mandate.
+    pub bind_all: bool,
 }
 
 /// Builds the input handler `rdpie_server_start` threads into
@@ -110,8 +113,9 @@ pub unsafe extern "C" fn rdpie_server_start(config: *const RdpieConfig) -> *mut 
         return core::ptr::null_mut();
     };
 
-    let server_config = crate::server::ServerConfig::loopback(
+    let server_config = crate::server::ServerConfig::new(
         config.port,
+        config.bind_all,
         crate::DesktopSize { width: config.width, height: config.height },
         username,
         password,
@@ -445,6 +449,7 @@ mod tests {
             key_pem_path: core::ptr::null(),
             input_callback: None,
             input_context: core::ptr::null_mut(),
+            bind_all: false,
         };
         assert!(input_handler_from_config(&config).is_none());
     }
@@ -480,6 +485,7 @@ mod tests {
             key_pem_path: key.as_ptr(),
             input_callback: Some(record),
             input_context: context,
+            bind_all: false,
         };
 
         let mut handler =
@@ -523,6 +529,7 @@ mod tests {
             key_pem_path: key_c.as_ptr(),
             input_callback: None,
             input_context: core::ptr::null_mut(),
+            bind_all: false,
         };
 
         let server = unsafe { rdpie_server_start(&config as *const RdpieConfig) };
