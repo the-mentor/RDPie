@@ -1,0 +1,4 @@
+module CRdpieCore {
+    header "include/rdpie_core.h"
+    export *
+}
