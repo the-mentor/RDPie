@@ -12,10 +12,15 @@ build-rust:
 
 # Build the Swift package. Always forces a relink first, since SwiftPM
 # doesn't track librdpie_core.a as a build input and will silently skip
-# relinking against a freshly rebuilt Rust core otherwise.
+# relinking against a freshly rebuilt Rust core otherwise. Filters out the
+# expected, harmless "was built for newer macOS version" linker warnings —
+# the Rust build targets the host OS, the Swift package targets 14.0, and
+# that mismatch is not a real problem (see docs/running-phase-1.md).
 build-swift: build-rust
+    #!/usr/bin/env bash
+    set -euo pipefail
     rm -f macos/.build/debug/rdpied macos/.build/arm64-apple-macosx/debug/rdpied
-    swift build --package-path macos
+    swift build --package-path macos 2>&1 | grep -v "was built for newer 'macOS' version"
 
 build: build-swift
 
