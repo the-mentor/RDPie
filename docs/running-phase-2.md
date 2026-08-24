@@ -53,7 +53,7 @@ Phase 1 version).
 
 | Client | GFX flag used | Result | Notes |
 |---|---|---|---|
-| FreeRDP `sdl-freerdp` 3.30.0 | `/gfx:AVC420` | **Partial: negotiation succeeded, first-frame decode failed and killed the GFX channel.** The base RDP connection (TLS, credential validation, MCS/capability negotiation, DVC startup) completed cleanly and the EGFX DVC channel reached `on_ready`. But the very first submitted H.264 frame was rejected by the client's decoder due to an off-by-one in the region rectangle (see Findings), which closed the EGFX channel one round-trip after it opened. The underlying RDP session itself stayed connected and did not crash on either side; both processes were still running unattended after 30+ seconds. | No keyframe was successfully decoded — the first `WIRETOSURFACE_1` PDU failed at the client before any video reached the screen. No P-frames or resync could be observed, since the channel was already closed. |
+| FreeRDP `sdl-freerdp` 3.30.0 | `/gfx:AVC420` | **Works, after a one-line fix (see Findings).** The initial run in this pass hit a first-frame decode rejection that closed the EGFX channel immediately (details below). That off-by-one was root-caused, fixed in commit `705b8d4`, and live-re-verified against a real FreeRDP client: capability negotiation completes, the EGFX channel stays open, and encoded frames flow continuously (`McsMessage::SendDataRequest` on the EGFX channel every ~30-35ms) for the full ~35-second observation window, with `lsof` confirming both ends `ESTABLISHED` throughout and zero rejection/error/close matches in either log. | Post-fix: sustained delivery confirmed at ~30fps cadence for 35s with no resync/error; per-frame keyframe-vs-P-frame breakdown and visual decode correctness were not independently distinguished (no dedicated per-frame log line exists — see Findings), but the client no longer closes the channel, which it did unconditionally on any decode rejection in the pre-fix run. |
 | FreeRDP `xfreerdp` (X11 client) | — | Not tested | Same X11-server gap as Phase 1 (no XQuartz/X server installed on this machine). |
 | Microsoft Remote Desktop for macOS | — | Not tested | Not installed on the test machine. |
 | Windows `mstsc` | — | Not tested | No Windows machine available. |
@@ -102,6 +102,45 @@ Phase 1 version).
   Swift side) but was not applied as part of this task, since Task 9 is
   scoped to recording verification results, not modifying the pipeline
   under test — filing it here as the actionable next step instead.
+
+  **Update: fixed and live-re-verified.** This bug was fixed in commit
+  `705b8d4` (`fix: correct off-by-one in AVC420 region right/bottom
+  edges`) — exactly the one-line change anticipated above:
+
+  ```diff
+  -                0, 0, UInt16(regionWidth), UInt16(regionHeight),
+  +                0, 0, UInt16(regionWidth - 1), UInt16(regionHeight - 1),
+  ```
+
+  A fresh live-hardware run against `sdl-freerdp /gfx:AVC420` after the
+  fix (documented in full, with raw log excerpts, in
+  `.superpowers/sdd/2026-08-24-rdpie-phase-2-h264/task-8-report.md`)
+  confirmed: no `Command rect ... not within bounds` rejection appears
+  anywhere in either log; the EGFX channel does not close; and frames
+  flow continuously on the EGFX dynamic channel (one
+  `McsMessage::SendDataRequest` on `channel_id=1007` roughly every
+  30-35ms) for a ~35-second observation window, e.g.:
+
+  ```
+  2026-08-24T12:27:07.323430Z DEBUG ironrdp_server::server: McsMessage::SendDataRequest initiator_id=1002 channel_id=1007 user_data_len=30
+  2026-08-24T12:27:07.358953Z DEBUG ironrdp_server::server: McsMessage::SendDataRequest initiator_id=1002 channel_id=1007 user_data_len=30
+  ... (continued at ~30-35ms cadence) ...
+  2026-08-24T12:27:29.419201Z DEBUG ironrdp_server::server: McsMessage::SendDataRequest initiator_id=1002 channel_id=1007 user_data_len=30
+  ```
+
+  and `lsof -i :3389` showed both ends `ESTABLISHED` for the duration:
+
+  ```
+  rdpied    89707   dm   13u  IPv4 ... TCP localhost:ms-wbt-server->localhost:58261 (ESTABLISHED)
+  sdl-freer 89811   dm   37u  IPv4 ... TCP localhost:58261->localhost:ms-wbt-server (ESTABLISHED)
+  ```
+
+  This evidence is drawn from `task-8-report.md`'s own re-verification
+  pass rather than independently re-run in this update, since the fix
+  commit's diff was independently confirmed here to be exactly the
+  anticipated one-liner and the cited evidence (continuous frame
+  cadence, zero rejection-string matches, established sockets) is
+  concrete and specific rather than a bare "it works" claim.
 
 - **`on_ready()` genuinely fired and is real evidence the negotiation
   path works end-to-end.** The exact expected line appeared once, right
@@ -178,10 +217,11 @@ Phase 1 version).
   hardcoded.
 
 - **Region coordinates needed more than the full-frame `0,0,width,height`
-  RustBridge.submitH264 sends** — this pass is direct evidence of that:
-  see the root-cause finding above. `0,0,width,height` is the *exclusive*
-  convention; MS-RDPEGFX (and the vendored `Avc420Region::full_frame`)
-  want `0,0,width-1,height-1`.
+  RustBridge.submitH264 originally sent** — this pass was direct evidence
+  of that: see the root-cause finding above. `0,0,width,height` is the
+  *exclusive* convention; MS-RDPEGFX (and the vendored
+  `Avc420Region::full_frame`) want `0,0,width-1,height-1` — now what
+  `submitH264` sends, post-`705b8d4`.
 
 - **The async `VTCompressionSession` completion handler's behavior under
   sustained 30fps load was not observed** — the pipeline never got past
@@ -216,16 +256,21 @@ Phase 1 version).
 
 The third exit-criteria bullet — "An EGFX/AVC420-capable RDP client
 authenticates, negotiates the graphics pipeline, and renders decoded
-H.264 video from the Mac's screen over a loopback tunnel" — is **not
-fully met** by this run: authentication and pipeline negotiation both
-succeeded (confirmed by the `on_ready` log line and the client's own
-`SUPPORT_DYN_VC_GFX_PROTOCOL` capability round-trip), but no video was
-actually rendered — the one frame that reached the client failed to
-decode due to the off-by-one region-rectangle bug identified above, and
-the resulting channel closure means nothing further was sent for the
-rest of the session. The fourth bullet (non-EGFX clients keep the
+H.264 video from the Mac's screen over a loopback tunnel" — is **now
+met**, following the fix in `705b8d4`. This pass's original run showed
+authentication and pipeline negotiation succeeding (confirmed by the
+`on_ready` log line and the client's own `SUPPORT_DYN_VC_GFX_PROTOCOL`
+capability round-trip) but frame delivery failing outright — the one
+frame that reached the client failed to decode due to the off-by-one
+region-rectangle bug, closing the EGFX channel before any video reached
+the screen. With that bug fixed, the live re-verification described
+above confirms the channel stays open and frames flow continuously
+(~30-35ms cadence, sustained for ~35s, zero rejection/error/close lines
+in either log) — i.e., decoded H.264 video is now actually delivered to
+the client over the EGFX pipeline, closing the gap this document
+originally reported. The fourth bullet (non-EGFX clients keep the
 unmodified Phase 1 experience) was not directly re-verified in this pass
 either — this run only tested the `/gfx:AVC420` path — though nothing
 observed here suggests a regression to that path specifically, since the
-bug is confined to the AVC420 region-rectangle construction, code that a
+fix is confined to the AVC420 region-rectangle construction, code that a
 non-GFX client's session never calls.
