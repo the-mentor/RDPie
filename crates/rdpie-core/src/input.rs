@@ -72,16 +72,13 @@ pub type RdpieInputCallback = unsafe extern "C" fn(context: *mut c_void, event: 
 /// Rust — it is only ever handed back, unchanged, to the same Swift code
 /// that produced it via `RdpieConfig::input_context`. Swift's callback is
 /// responsible for whatever thread-safety `context` itself needs.
-#[allow(dead_code)]
 struct SendableContext(*mut c_void);
 unsafe impl Send for SendableContext {}
 
 /// Translates in-scope `KeyboardEvent`/`MouseEvent` variants and invokes the
 /// registered callback. Constructed once per server start in `ffi.rs`.
 pub struct RdpieInputHandler {
-    #[allow(dead_code)]
     callback: RdpieInputCallback,
-    #[allow(dead_code)]
     context: SendableContext,
 }
 
@@ -238,9 +235,6 @@ impl RdpServerInputHandler for RdpieInputHandler {
 #[cfg(test)]
 mod tests {
     use std::sync::{Arc, Mutex};
-
-    #[allow(unused_imports)]
-    use ironrdp_server::RdpServerInputHandler as _;
 
     use super::*;
 

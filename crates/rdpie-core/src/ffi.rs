@@ -3,7 +3,7 @@
 use core::ffi::{CStr, c_char, c_void};
 
 use crate::frame::{Frame, FrameSink, SubmitOutcome};
-use crate::input::{RdpieInputCallback, RdpieInputEvent, RdpieInputHandler};
+use crate::input::{RdpieInputEvent, RdpieInputHandler};
 
 /// Opaque handle returned to Swift.
 ///
