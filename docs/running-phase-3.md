@@ -84,10 +84,12 @@ anything other than `1`) to stay loopback-only.
 
 ## Verification checklist for a live pass
 
-- [ ] Connect with an RDP client and confirm keyboard input (a plain
+- [x] Connect with an RDP client and confirm keyboard input (a plain
       letter, a digit, an arrow key, Backspace/Delete) reaches the
-      focused application on the Mac.
-- [ ] Confirm mouse move, left-click, and right-click all work.
+      focused application on the Mac. Confirmed live from a mobile
+      device over `RDPIE_BIND_ALL=1` — see the EGFX caveat below.
+- [x] Confirm mouse move, left-click, and right-click all work. Confirmed
+      live alongside the keyboard check above.
 - [ ] Confirm vertical scroll moves content in the expected direction
       (`scroll_delta`'s sign is passed straight through from the RDP wire
       value — see `InputInjector`'s `ponytail:` comment on the scroll
@@ -101,3 +103,22 @@ anything other than `1`) to stay loopback-only.
       does not latch the lock state on macOS (that needs
       `IOHIDSetModifierLockState`, out of scope for this phase) — CapsLock
       may not visibly toggle even though the event was injected.
+
+### Known issue: some clients disconnect during EGFX/AVC420 negotiation
+
+At least one mobile RDP client (Microsoft's official Android app) closes
+the EGFX channel and drops the connection ~45ms after accepting AVC420
+capabilities, before the daemon's first encoded frame is ready — even
+after pre-warming the H.264 encoder ahead of the connection (see
+`main.swift`'s `freshH264Encoder`). The close-timing was measured as
+constant across changes to desktop size and encoder latency, which rules
+out a simple race and points at something else in the EGFX/AVC420
+handshake this client doesn't like — root cause not yet found.
+
+Confirmed via a live test that disabling the graphics pipeline entirely
+(commenting out `.with_gfx_factory(...)` in `crates/rdpie-core/src/server.rs`,
+forcing the plain bitmap/RemoteFX fallback) lets the same client connect
+and use input successfully, at much lower video quality. This isolates
+the problem to the AVC420/EGFX path specifically — it is not a general
+connection or input-path issue. Useful as a manual workaround for testing
+input on an affected client; not a fix, and not applied by default.
