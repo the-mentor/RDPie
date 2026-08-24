@@ -27,3 +27,4 @@ tokio-rustls = "0.26"
 tokio = { version = "1", features = ["full"] }
 rcgen = "0.14"
 tempfile = "3"
+ironrdp-pdu = "0.9"

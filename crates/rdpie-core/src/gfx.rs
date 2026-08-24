@@ -66,6 +66,26 @@ impl GraphicsPipelineHandler for RdpieGfxHandler {
     fn on_ready(&mut self, _negotiated: &CapabilitySet) {
         self.state.ready.store(true, Ordering::Release);
         tracing::info!("EGFX channel ready; client accepts AVC420 video");
+
+        // Proactively create and flush the surface now rather than waiting
+        // for the first captured frame. Confirmed live: a mobile client
+        // closed the EGFX channel and disconnected ~45ms after this point,
+        // consistently, regardless of desktop size or how fast the encoder
+        // could produce a frame — a fixed delay unrelated to frame content
+        // points at the client expecting to see ResetGraphics/CreateSurface
+        // shortly after negotiation, not whenever a frame happens to be
+        // ready. Spawned as a task, not called directly: `on_ready` runs
+        // while `GraphicsPipelineServer`'s own mutex is already held by the
+        // caller (see the module-level deadlock note above) — calling
+        // `ensure_surface` here directly would deadlock. A spawned task
+        // runs on a fresh call stack once this function returns and the
+        // lock is released.
+        let state = Arc::clone(&self.state);
+        tokio::task::spawn(async move {
+            if !(RdpieGfxHandle { state }).ensure_surface() {
+                tracing::debug!("proactive EGFX surface creation did not complete");
+            }
+        });
     }
 
     fn on_close(&mut self) {
@@ -121,10 +141,85 @@ impl RdpieGfxHandle {
         (self.state.width, self.state.height)
     }
 
-    /// Push one AVC420-encoded frame to the client.
+    /// Creates and maps the single full-desktop surface if not already
+    /// done, flushing the resulting ResetGraphics/CreateSurface/
+    /// MapSurfaceToOutput PDUs to the client immediately. Idempotent: a
+    /// no-op returning `true` if the surface already exists (whichever of
+    /// the proactive `on_ready` task or a real frame submission gets here
+    /// first wins; the loser sees the surface already set and skips
+    /// straight past). AVC444 is out of scope for this phase — see spec
+    /// follow-up.
     ///
-    /// Creates and maps the single full-desktop surface on first successful
-    /// call. AVC444 is out of scope for this phase — see spec follow-up.
+    /// Returns `false` — never panics — if: no connection is currently
+    /// live, the surface could not be created or mapped, or the resulting
+    /// PDUs could not be encoded or handed to the connection's event loop
+    /// (the loop may have already shut down).
+    fn ensure_surface(&self) -> bool {
+        let Some(sender) = self.state.sender.lock().expect("gfx sender mutex poisoned").clone() else {
+            tracing::debug!("ensure_surface: no event sender registered yet");
+            return false;
+        };
+
+        let handle = {
+            let guard = self.state.handle.lock().expect("gfx handle mutex poisoned");
+            let Some(handle) = guard.as_ref() else {
+                tracing::debug!("ensure_surface: no GFX server handle yet");
+                return false;
+            };
+            Arc::clone(handle)
+        };
+
+        let (channel_id, dvc_messages) = {
+            let mut server = handle.lock().expect("GfxServerHandle mutex poisoned");
+
+            let mut surface_guard = self.state.surface_id.lock().expect("gfx surface mutex poisoned");
+            if surface_guard.is_some() {
+                return true;
+            }
+
+            let Some(id) = server.create_surface(self.state.width, self.state.height) else {
+                tracing::debug!("ensure_surface: create_surface failed");
+                return false;
+            };
+            if !server.map_surface_to_output(id, 0, 0) {
+                tracing::debug!("ensure_surface: map_surface_to_output failed");
+                return false;
+            }
+            *surface_guard = Some(id);
+            drop(surface_guard);
+
+            let Some(channel_id) = server.channel_id() else {
+                // Should not happen once `is_ready()` is true (the DVC start()
+                // callback that sets this fires before capability negotiation
+                // completes), but a client-driven protocol edge case is not a
+                // reason to panic.
+                tracing::debug!("ensure_surface: no channel_id after is_ready");
+                return false;
+            };
+
+            (channel_id, server.drain_output())
+        };
+
+        let svc_messages = match ironrdp_dvc::encode_dvc_messages(
+            channel_id,
+            dvc_messages,
+            ironrdp_svc::ChannelFlags::SHOW_PROTOCOL,
+        ) {
+            Ok(messages) => messages,
+            Err(error) => {
+                tracing::error!(%error, "encoding EGFX surface-setup DVC messages");
+                return false;
+            }
+        };
+
+        let sent = sender
+            .send(ServerEvent::Egfx(EgfxServerMessage::SendMessages { messages: svc_messages }))
+            .is_ok();
+        tracing::debug!(sent, "flushed proactive EGFX surface setup");
+        sent
+    }
+
+    /// Push one AVC420-encoded frame to the client.
     ///
     /// Returns `false` — never panics — if: the channel has not finished
     /// negotiation, no connection is currently live, the surface could not
@@ -134,6 +229,13 @@ impl RdpieGfxHandle {
     /// event loop (the loop may have already shut down).
     pub fn submit_avc420_frame(&self, h264_data: &[u8], regions: &[Avc420Region], timestamp_ms: u32) -> bool {
         if !self.is_ready() {
+            return false;
+        }
+
+        // Usually already done by the proactive on_ready task by the time a
+        // frame is ready; this is the lazy fallback for the rare case where
+        // a frame becomes ready before that task has run.
+        if self.state.surface_id.lock().expect("gfx surface mutex poisoned").is_none() && !self.ensure_surface() {
             return false;
         }
 
@@ -152,21 +254,12 @@ impl RdpieGfxHandle {
         let (channel_id, dvc_messages) = {
             let mut server = handle.lock().expect("GfxServerHandle mutex poisoned");
 
-            let mut surface_guard = self.state.surface_id.lock().expect("gfx surface mutex poisoned");
-            let surface_id = match *surface_guard {
-                Some(id) => id,
-                None => {
-                    let Some(id) = server.create_surface(self.state.width, self.state.height) else {
-                        return false;
-                    };
-                    if !server.map_surface_to_output(id, 0, 0) {
-                        return false;
-                    }
-                    *surface_guard = Some(id);
-                    id
-                }
-            };
-            drop(surface_guard);
+            let surface_id = self
+                .state
+                .surface_id
+                .lock()
+                .expect("gfx surface mutex poisoned")
+                .expect("ensure_surface guarantees this is set on success");
 
             if server.send_avc420_frame(surface_id, h264_data, regions, timestamp_ms).is_none() {
                 return false;
@@ -213,12 +306,19 @@ impl RdpieGfxHandle {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
+    use ironrdp_dvc::DvcProcessor as _;
     use ironrdp_egfx::pdu::CapabilitiesV8Flags;
 
     use super::*;
 
-    #[test]
-    fn ready_flag_starts_false_and_flips_true_after_on_ready() {
+    // `on_ready` spawns a task (see its doc comment for why), which panics
+    // outside a running Tokio runtime — every test that calls `on_ready`
+    // needs one, even if the test itself is otherwise synchronous.
+
+    #[tokio::test]
+    async fn ready_flag_starts_false_and_flips_true_after_on_ready() {
         let (factory, gfx) = gfx_channel(1920, 1080);
         assert!(!gfx.is_ready());
 
@@ -234,8 +334,8 @@ mod tests {
         assert!(!gfx.submit_avc420_frame(&[], &[], 0));
     }
 
-    #[test]
-    fn submit_after_on_ready_but_before_a_sender_is_set_is_rejected_not_a_crash() {
+    #[tokio::test]
+    async fn submit_after_on_ready_but_before_a_sender_is_set_is_rejected_not_a_crash() {
         let (factory, gfx) = gfx_channel(1920, 1080);
         let mut handler = factory.build_gfx_handler();
         handler.on_ready(&CapabilitySet::V8 { flags: CapabilitiesV8Flags::empty() });
@@ -246,5 +346,58 @@ mod tests {
         // nowhere to route the encoded PDUs even though negotiation looks
         // complete from the handle's point of view.
         assert!(!gfx.submit_avc420_frame(&[], &[], 0));
+    }
+
+    #[tokio::test]
+    async fn on_ready_proactively_creates_and_flushes_the_surface_without_a_frame() {
+        use ironrdp_egfx::pdu::GfxPdu;
+        use ironrdp_pdu::{Encode as _, WriteCursor};
+
+        let (mut factory, gfx) = gfx_channel(640, 480);
+
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        factory.set_sender(tx);
+
+        let (_bridge, handle) = factory.build_server_with_handle().expect("factory always returns Some");
+
+        // Calling `on_ready` directly on a standalone handler (as the other
+        // tests in this module do) is not enough here: `create_surface`
+        // gates on `GraphicsPipelineServer`'s own internal state machine
+        // reaching `Ready`, which is only set by actually processing a
+        // real `CapabilitiesAdvertise` PDU — so build and encode one, then
+        // drive it through the real `process()` call. This also exercises
+        // the real handler embedded in the server (shares this test's
+        // `gfx` handle via the same `Arc<GfxState>`), which is what
+        // actually calls `on_ready` and triggers the proactive spawn.
+        let advertise = GfxPdu::CapabilitiesAdvertise(CapabilitiesAdvertisePdu::from_typed(&[
+            CapabilitySet::V8 { flags: CapabilitiesV8Flags::empty() },
+        ]));
+        let mut bytes = vec![0u8; advertise.size()];
+        advertise
+            .encode(&mut WriteCursor::new(&mut bytes))
+            .expect("encoding a synthetic CapabilitiesAdvertise PDU");
+
+        {
+            let mut server = handle.lock().expect("GfxServerHandle mutex poisoned");
+            // Real negotiation sets `channel_id` via the DVC `start()`
+            // callback before any PDU is processed.
+            server.start(3).expect("start never fails");
+            server.process(3, &bytes).expect("processing a synthetic CapabilitiesAdvertise PDU");
+        }
+
+        assert!(gfx.is_ready(), "processing CapabilitiesAdvertise should have called on_ready");
+
+        // The proactive task runs on a spawned task, not synchronously
+        // within on_ready (see its doc comment) — bounded wait so a broken
+        // fix fails the test instead of hanging it.
+        let event = tokio::time::timeout(Duration::from_secs(1), rx.recv())
+            .await
+            .expect("proactive surface creation should flush a message within 1s")
+            .expect("channel should not close while the sender is held above");
+
+        let ServerEvent::Egfx(EgfxServerMessage::SendMessages { messages }) = event else {
+            panic!("expected a ServerEvent::Egfx(SendMessages), got {event:?}");
+        };
+        assert!(!messages.is_empty(), "expected non-empty ResetGraphics/CreateSurface PDU bytes");
     }
 }
