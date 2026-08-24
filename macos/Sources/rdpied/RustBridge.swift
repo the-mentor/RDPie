@@ -81,7 +81,7 @@ final class RustBridge {
             _ = rdpie_server_submit_h264_frame(
                 handle,
                 base, UInt(buffer.count),
-                0, 0, UInt16(regionWidth), UInt16(regionHeight),
+                0, 0, UInt16(regionWidth - 1), UInt16(regionHeight - 1),
                 Self.defaultQuantizationParameter,
                 frame.timestampMs)
         }
