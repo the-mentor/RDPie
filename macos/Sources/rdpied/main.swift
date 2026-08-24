@@ -6,7 +6,7 @@ import RdpieCapture
 // storage arrive in Phase 7; hardcoding a credential here would be a security
 // regression, so an explicit password is required.
 guard let password = ProcessInfo.processInfo.environment["RDPIE_PASSWORD"], !password.isEmpty else {
-    FileHandle.standardError.write("RDPIE_PASSWORD must be set\n".data(using: .utf8)!)
+    FileHandle.standardError.write(Data("RDPIE_PASSWORD must be set\n".utf8))
     exit(2)
 }
 let username = ProcessInfo.processInfo.environment["RDPIE_USERNAME"] ?? "rdpie"
@@ -21,16 +21,17 @@ let source: CaptureSource = useSynthetic ? SyntheticCaptureSource() : ScreenCapt
 
 if !useSynthetic && !ScreenCaptureKitSource.hasPermission() {
     FileHandle.standardError.write(
-        "Screen Recording permission is required. Grant it in System Settings › Privacy & Security › Screen Recording, then run again.\n"
-            .data(using: .utf8)!)
+        Data("Screen Recording permission is required. Grant it in System Settings › Privacy & Security › Screen Recording, then run again.\n".utf8))
     exit(3)
 }
 
 if !InputInjector.hasAccessibilityPermission() {
+    // Global Constraint: Accessibility only gates the optional input
+    // capability, which is designed to degrade gracefully everywhere else
+    // in this feature (see the mid-session revocation handling below) —
+    // unlike Screen Recording above, it must not refuse to start.
     FileHandle.standardError.write(
-        "Accessibility permission is required for input control. Grant it in System Settings › Privacy & Security › Accessibility, then run again.\n"
-            .data(using: .utf8)!)
-    exit(4)
+        Data("Accessibility permission not granted — starting in view-only mode. Grant it in System Settings › Privacy & Security › Accessibility to enable input control.\n".utf8))
 }
 
 let bridge = RustBridge()
@@ -42,7 +43,11 @@ try source.start(configuration: CaptureConfiguration(
     width: width, height: height, framesPerSecond: 30))
 
 signal(SIGINT) { _ in exit(0) }
-print("rdpied listening on 127.0.0.1:3389 — connect with an RDP client")
+if bindAll {
+    print("rdpied listening on 0.0.0.0:3389 (RDPIE_BIND_ALL=1 — reachable from the network, not just this machine) — connect with an RDP client")
+} else {
+    print("rdpied listening on 127.0.0.1:3389 — connect with an RDP client")
+}
 
 // Created eagerly, not on the first frame after a client negotiates EGFX:
 // `VTCompressionSession` setup takes long enough (~100ms on this hardware)
@@ -62,7 +67,12 @@ func freshH264Encoder() -> H264Encoder? {
 
 var h264Encoder = freshH264Encoder()
 var wasGfxActive = false
-var wasAccessibilityGranted = true // Step 3's check already required this true to get here
+// Not necessarily true — Accessibility is no longer required to start (see
+// the view-only-mode warning above) — but `hasAccessibilityPermission()` is
+// polled fresh on the first loop iteration below before this is ever read,
+// so the initial value only affects whether that first iteration logs a
+// spurious "revoked" line; starting optimistic avoids that.
+var wasAccessibilityGranted = true
 let encoderClockStart = DispatchTime.now()
 
 for await frame in source.frames {
@@ -74,8 +84,7 @@ for await frame in source.frames {
         // `source`/`bridge` — this line exists purely so a revocation is
         // visible in the log instead of silently going unnoticed.
         FileHandle.standardError.write(
-            "Accessibility permission revoked — continuing in view-only mode.\n"
-                .data(using: .utf8)!)
+            Data("Accessibility permission revoked — continuing in view-only mode.\n".utf8))
     }
     wasAccessibilityGranted = accessibilityGranted
 

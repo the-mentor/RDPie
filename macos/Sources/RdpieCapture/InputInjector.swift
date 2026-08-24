@@ -8,10 +8,13 @@ import CRdpieCore
 /// `ApplicationServices` — see the plan's File Structure rationale.
 ///
 /// One `InputInjector` is owned by `RustBridge` (Task 6) for the life of
-/// the process and is called synchronously, serially, from the Rust core's
-/// single dedicated per-connection thread (see this plan's Global
-/// Constraints) — there is never more than one in-flight call into a given
-/// instance, so `droppedEventCount` needs no synchronization.
+/// the process. Calls into a given instance are strictly serialized by
+/// upstream's own `Arc<tokio::sync::Mutex<handler>>` around the AINPUT
+/// dynamic channel handler (not necessarily from one fixed thread — the
+/// handler is invoked via `task::spawn_blocking`, i.e. a tokio
+/// blocking-pool thread that can vary call to call) — so there is never
+/// more than one in-flight call into a given instance, and
+/// `droppedEventCount` needs no synchronization for that reason.
 public final class InputInjector {
 
     /// Counts every event this injector dropped instead of posting —
@@ -23,7 +26,36 @@ public final class InputInjector {
 
     private let source = CGEventSource(stateID: .hidSystemState)
 
-    public init() {}
+    /// The RDP desktop's configured size (`macos/Sources/rdpied/main.swift`'s
+    /// `width`/`height`) — `MouseMove` coordinates arrive in this space and
+    /// must be scaled into the main display's point space before becoming a
+    /// `CGPoint`. See `scaledCursorPosition`.
+    private let desktopWidth: Int
+    private let desktopHeight: Int
+
+    private let hasAccessibility: () -> Bool
+    private let post: (CGEvent?) -> Void
+
+    /// - Parameters:
+    ///   - width/height: the configured RDP desktop size, in the same space
+    ///     `RdpieInputEvent.x`/`.y` arrive in. Defaults match `main.swift`'s
+    ///     hardcoded 1280x720 so `RustBridge.swift`'s existing no-argument
+    ///     `InputInjector()` call site keeps working unchanged; real usage
+    ///     should pass the actual configured size (see `RustBridge.start`).
+    ///   - hasAccessibility: injectable Accessibility gate, so tests can get
+    ///     past it without a live trusted process. Defaults to the real
+    ///     `AXIsProcessTrusted()`-backed check.
+    ///   - post: injectable event sink, so tests can observe what would
+    ///     have been posted without actually injecting live input. Defaults
+    ///     to the real `CGEvent.post(tap: .cghidEventTap)`.
+    public init(width: Int = 1280, height: Int = 720,
+                hasAccessibility: @escaping () -> Bool = { InputInjector.hasAccessibilityPermission() },
+                post: @escaping (CGEvent?) -> Void = { $0?.post(tap: .cghidEventTap) }) {
+        self.desktopWidth = width
+        self.desktopHeight = height
+        self.hasAccessibility = hasAccessibility
+        self.post = post
+    }
 
     /// Confirmed by `spikes/cgevent-injection/RESULTS.md` to be exactly the
     /// gate `CGEventPost` needs, with no extra entitlement, from a plain
@@ -47,7 +79,7 @@ public final class InputInjector {
     /// concern to satisfy before this method ever sees the value, so
     /// nothing here needs to reason about pointer lifetime.
     public func handle(_ event: RdpieInputEvent) {
-        guard Self.hasAccessibilityPermission() else {
+        guard hasAccessibility() else {
             // Global Constraint: clients before Accessibility is granted,
             // and Accessibility revoked mid-session, must not crash the
             // connection — drop the event, don't error the session.
@@ -61,39 +93,39 @@ public final class InputInjector {
         case KeyReleased:
             postKey(event, keyDown: false)
         case MouseMove:
-            post(CGEvent(mouseEventSource: source, mouseType: .mouseMoved,
-                          mouseCursorPosition: CGPoint(x: Int(event.x), y: Int(event.y)),
-                          mouseButton: .left))
+            dispatch(CGEvent(mouseEventSource: source, mouseType: .mouseMoved,
+                              mouseCursorPosition: scaledCursorPosition(event),
+                              mouseButton: .left))
         case MouseLeftPressed:
-            post(CGEvent(mouseEventSource: source, mouseType: .leftMouseDown,
-                          mouseCursorPosition: currentCursorLocation(), mouseButton: .left))
+            dispatch(CGEvent(mouseEventSource: source, mouseType: .leftMouseDown,
+                              mouseCursorPosition: currentCursorLocation(), mouseButton: .left))
         case MouseLeftReleased:
-            post(CGEvent(mouseEventSource: source, mouseType: .leftMouseUp,
-                          mouseCursorPosition: currentCursorLocation(), mouseButton: .left))
+            dispatch(CGEvent(mouseEventSource: source, mouseType: .leftMouseUp,
+                              mouseCursorPosition: currentCursorLocation(), mouseButton: .left))
         case MouseRightPressed:
-            post(CGEvent(mouseEventSource: source, mouseType: .rightMouseDown,
-                          mouseCursorPosition: currentCursorLocation(), mouseButton: .right))
+            dispatch(CGEvent(mouseEventSource: source, mouseType: .rightMouseDown,
+                              mouseCursorPosition: currentCursorLocation(), mouseButton: .right))
         case MouseRightReleased:
-            post(CGEvent(mouseEventSource: source, mouseType: .rightMouseUp,
-                          mouseCursorPosition: currentCursorLocation(), mouseButton: .right))
+            dispatch(CGEvent(mouseEventSource: source, mouseType: .rightMouseUp,
+                              mouseCursorPosition: currentCursorLocation(), mouseButton: .right))
         case MouseMiddlePressed:
-            post(CGEvent(mouseEventSource: source, mouseType: .otherMouseDown,
-                          mouseCursorPosition: currentCursorLocation(), mouseButton: .center))
+            dispatch(CGEvent(mouseEventSource: source, mouseType: .otherMouseDown,
+                              mouseCursorPosition: currentCursorLocation(), mouseButton: .center))
         case MouseMiddleReleased:
-            post(CGEvent(mouseEventSource: source, mouseType: .otherMouseUp,
-                          mouseCursorPosition: currentCursorLocation(), mouseButton: .center))
+            dispatch(CGEvent(mouseEventSource: source, mouseType: .otherMouseUp,
+                              mouseCursorPosition: currentCursorLocation(), mouseButton: .center))
         case MouseButton4Pressed:
-            post(CGEvent(mouseEventSource: source, mouseType: .otherMouseDown,
-                          mouseCursorPosition: currentCursorLocation(), mouseButton: Self.button4))
+            dispatch(CGEvent(mouseEventSource: source, mouseType: .otherMouseDown,
+                              mouseCursorPosition: currentCursorLocation(), mouseButton: Self.button4))
         case MouseButton4Released:
-            post(CGEvent(mouseEventSource: source, mouseType: .otherMouseUp,
-                          mouseCursorPosition: currentCursorLocation(), mouseButton: Self.button4))
+            dispatch(CGEvent(mouseEventSource: source, mouseType: .otherMouseUp,
+                              mouseCursorPosition: currentCursorLocation(), mouseButton: Self.button4))
         case MouseButton5Pressed:
-            post(CGEvent(mouseEventSource: source, mouseType: .otherMouseDown,
-                          mouseCursorPosition: currentCursorLocation(), mouseButton: Self.button5))
+            dispatch(CGEvent(mouseEventSource: source, mouseType: .otherMouseDown,
+                              mouseCursorPosition: currentCursorLocation(), mouseButton: Self.button5))
         case MouseButton5Released:
-            post(CGEvent(mouseEventSource: source, mouseType: .otherMouseUp,
-                          mouseCursorPosition: currentCursorLocation(), mouseButton: Self.button5))
+            dispatch(CGEvent(mouseEventSource: source, mouseType: .otherMouseUp,
+                              mouseCursorPosition: currentCursorLocation(), mouseButton: Self.button5))
         case MouseVerticalScroll:
             // `CGMouseButton` only declares 3 named cases (left/right/center
             // = 0/1/2) — there is no `CGEventType` case for a 4th/5th
@@ -115,8 +147,8 @@ public final class InputInjector {
             // distortion). Revisit the unit choice if live client testing
             // shows scroll feels wrong; the contract forbids rescaling the
             // value itself, not picking a different `CGScrollEventUnit`.
-            post(CGEvent(scrollWheelEvent2Source: source, units: .pixel, wheelCount: 1,
-                          wheel1: Int32(event.scroll_delta), wheel2: 0, wheel3: 0))
+            dispatch(CGEvent(scrollWheelEvent2Source: source, units: .pixel, wheelCount: 1,
+                              wheel1: Int32(event.scroll_delta), wheel2: 0, wheel3: 0))
         default:
             // Reachable only if the Rust core ever adds a new
             // `RdpieInputEventKind` case without a matching branch above —
@@ -126,8 +158,7 @@ public final class InputInjector {
             // explicitly above. Not a silent catch-all: it logs and drops,
             // same as every other drop path in this method.
             FileHandle.standardError.write(
-                "InputInjector: unrecognized RdpieInputEventKind — dropping\n"
-                    .data(using: .utf8)!)
+                Data("InputInjector: unrecognized RdpieInputEventKind — dropping\n".utf8))
             droppedEventCount += 1
         }
     }
@@ -138,12 +169,11 @@ public final class InputInjector {
     private func postKey(_ event: RdpieInputEvent, keyDown: Bool) {
         guard let keyCode = ScancodeMap.lookup(scancode: event.scancode, extended: event.extended) else {
             FileHandle.standardError.write(
-                "InputInjector: no CGKeyCode for scancode 0x\(String(event.scancode, radix: 16)) (extended: \(event.extended)) — dropping\n"
-                    .data(using: .utf8)!)
+                Data("InputInjector: no CGKeyCode for scancode 0x\(String(event.scancode, radix: 16)) (extended: \(event.extended)) — dropping\n".utf8))
             droppedEventCount += 1
             return
         }
-        post(CGEvent(keyboardEventSource: source, virtualKey: keyCode, keyDown: keyDown))
+        dispatch(CGEvent(keyboardEventSource: source, virtualKey: keyCode, keyDown: keyDown))
     }
 
     /// Button press/release events carry no coordinates on the wire (`x`/`y`
@@ -157,11 +187,35 @@ public final class InputInjector {
         CGEvent(source: nil)?.location ?? .zero
     }
 
-    private func post(_ event: CGEvent?) {
+    /// Scales an `RdpieInputEvent`'s `x`/`y` (in the configured RDP desktop's
+    /// coordinate space — see `desktopWidth`/`desktopHeight`) into the main
+    /// display's global point space, which is what `CGEvent`'s
+    /// `mouseCursorPosition` actually expects. Single-display only, matching
+    /// this whole phase's scope — no multi-monitor mapping.
+    ///
+    /// Y already increases downward in both RDP and macOS's global display
+    /// space, so no flip is needed, only a scale.
+    private func scaledCursorPosition(_ event: RdpieInputEvent) -> CGPoint {
+        Self.scale(x: event.x, y: event.y,
+                    desktopWidth: desktopWidth, desktopHeight: desktopHeight,
+                    displayBounds: CGDisplayBounds(CGMainDisplayID()))
+    }
+
+    /// Pure scaling math, factored out of `scaledCursorPosition` so it's
+    /// testable without a live `CGDisplayBounds(CGMainDisplayID())` call —
+    /// tests pass a stand-in `displayBounds` instead.
+    static func scale(x: UInt16, y: UInt16, desktopWidth: Int, desktopHeight: Int,
+                       displayBounds: CGRect) -> CGPoint {
+        let scaledX = CGFloat(x) * (displayBounds.width / CGFloat(desktopWidth))
+        let scaledY = CGFloat(y) * (displayBounds.height / CGFloat(desktopHeight))
+        return CGPoint(x: scaledX, y: scaledY)
+    }
+
+    private func dispatch(_ event: CGEvent?) {
         guard let event else {
             droppedEventCount += 1
             return
         }
-        event.post(tap: .cghidEventTap)
+        post(event)
     }
 }

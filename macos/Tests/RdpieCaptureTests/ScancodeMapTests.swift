@@ -56,5 +56,25 @@ final class ScancodeMapTests: XCTestCase {
         // semantic action from an editor's insert-mode toggle — not a safe
         // guess to bake into a lookup table silently. Left unmapped.
         XCTAssertNil(ScancodeMap.lookup(scancode: 0x52, extended: true))
+        // Apps/menu key (E0 0x5D): no macOS equivalent — there is no
+        // "context menu" virtual key on any Mac keyboard layout. Left
+        // unmapped rather than guessed.
+        XCTAssertNil(ScancodeMap.lookup(scancode: 0x5D, extended: true))
+    }
+
+    func testLeftCommandKey() {
+        // E0 0x5B is the Left Windows key -> kVK_Command (0x37).
+        XCTAssertEqual(ScancodeMap.lookup(scancode: 0x5B, extended: true), 0x37)
+    }
+
+    func testRightCommandKey() {
+        // E0 0x5C is the Right Windows key -> kVK_RightCommand (0x36).
+        XCTAssertEqual(ScancodeMap.lookup(scancode: 0x5C, extended: true), 0x36)
+    }
+
+    func testISOExtraKey() {
+        // Set 1 scancode 0x56 is the ISO extra key (between Left Shift and
+        // Z on non-US layouts) -> kVK_ISO_Section (0x0A).
+        XCTAssertEqual(ScancodeMap.lookup(scancode: 0x56, extended: false), 0x0A)
     }
 }

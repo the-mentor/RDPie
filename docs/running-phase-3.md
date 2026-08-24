@@ -21,13 +21,15 @@ grep -n "RdpieInputEvent\|RdpieInputCallback\|input_callback" macos/Sources/CRdp
 RDPIE_PASSWORD=hunter2 RUST_LOG=debug just run
 ```
 
-No new environment variables were added for Phase 3.
+See "Testing from a real RDP client, not just loopback" below for
+`RDPIE_BIND_ALL`, the one environment variable Phase 3 adds.
 
 ### Granting Accessibility
 
-`rdpied` now checks Accessibility at startup (exit code 4, with a message,
-if it's missing) the same way it already checks Screen Recording (exit
-code 3). Grant it in **System Settings › Privacy & Security ›
+`rdpied` now checks Accessibility at startup and warns (but keeps running
+in view-only mode) if it's missing — unlike Screen Recording (exit code 3),
+which is load-bearing for the whole product and still hard-exits if
+missing. Grant Accessibility in **System Settings › Privacy & Security ›
 Accessibility**. Like Screen Recording, TCC attributes the grant to the
 *containing* app, not the `rdpied` binary itself — running from a terminal
 during development prompts for that terminal app (e.g. "iTerm2.app would
@@ -74,3 +76,7 @@ anything other than `1`) to stay loopback-only.
       stops being applied.
 - [ ] Re-grant Accessibility mid-session and confirm input resumes without
       a reconnect.
+- [ ] Known limitation, not a bug to chase: a plain CapsLock keyDown/keyUp
+      does not latch the lock state on macOS (that needs
+      `IOHIDSetModifierLockState`, out of scope for this phase) — CapsLock
+      may not visibly toggle even though the event was injected.

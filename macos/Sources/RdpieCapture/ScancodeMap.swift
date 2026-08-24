@@ -26,10 +26,11 @@ public struct ScancodeKey: Hashable {
 /// scancode layout. The macOS half was read directly from
 /// `Carbon.framework`'s `HIToolbox.framework/Headers/Events.h` (see Task 4
 /// Step 1's grep) — not from memory. Keys with no confident macOS
-/// equivalent (NumLock, ScrollLock, Insert — see `ScancodeMapTests
-/// .testDeliberatelyUnmappedKeysReturnNil`) are left out of the table
-/// entirely; `lookup` returns `nil` for them, and the caller (Task 5's
-/// `InputInjector`) drops the event rather than injecting a guessed key.
+/// equivalent (NumLock, ScrollLock, Insert, the Apps/menu key — see
+/// `ScancodeMapTests.testDeliberatelyUnmappedKeysReturnNil`) are left out of
+/// the table entirely; `lookup` returns `nil` for them, and the caller
+/// (Task 5's `InputInjector`) drops the event rather than injecting a
+/// guessed key.
 public enum ScancodeMap {
 
     public static func lookup(scancode: UInt8, extended: Bool) -> CGKeyCode? {
@@ -155,5 +156,13 @@ public enum ScancodeMap {
         // E0 0x52 Insert: deliberately absent — see
         // ScancodeMapTests.testDeliberatelyUnmappedKeysReturnNil.
         ScancodeKey(scancode: 0x53, extended: true): CGKeyCode(kVK_ForwardDelete),
+
+        // Command/Windows keys and the ISO extra key.
+        ScancodeKey(scancode: 0x5B, extended: true): CGKeyCode(kVK_Command), // Left Command/Windows
+        ScancodeKey(scancode: 0x5C, extended: true): CGKeyCode(kVK_RightCommand), // Right Command/Windows
+        ScancodeKey(scancode: 0x56, extended: false): CGKeyCode(kVK_ISO_Section), // ISO extra key
+
+        // E0 0x5D Apps/menu key: deliberately absent — see
+        // ScancodeMapTests.testDeliberatelyUnmappedKeysReturnNil.
     ]
 }

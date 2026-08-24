@@ -39,12 +39,16 @@ final class RustBridge {
 
     /// Owned for the life of this bridge so `rdpieHandleInputEvent` always
     /// has somewhere real to deliver events, from process startup — before
-    /// any client has connected — through to `stop()`.
-    let inputInjector = InputInjector()
+    /// any client has connected — through to `stop()`. Constructed with the
+    /// real configured desktop size in `start`, below, once it's known;
+    /// mouse coordinates need it to scale correctly onto the real display
+    /// (see `InputInjector.scaledCursorPosition`).
+    private(set) var inputInjector = InputInjector()
 
     func start(port: UInt16, width: Int, height: Int,
                username: String, password: String,
                certPath: String, keyPath: String, bindAll: Bool = false) throws {
+        inputInjector = InputInjector(width: width, height: height)
         try username.withCString { user in
             try password.withCString { pass in
                 try certPath.withCString { cert in
