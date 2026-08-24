@@ -10,7 +10,16 @@ let package = Package(
     ],
     targets: [
         .target(name: "RdpieCapture"),
-        .executableTarget(name: "rdpied", dependencies: ["RdpieCapture"]),
+        .systemLibrary(name: "CRdpieCore", path: "Sources/CRdpieCore"),
+        .executableTarget(
+            name: "rdpied",
+            dependencies: ["RdpieCapture", "CRdpieCore"],
+            linkerSettings: [
+                .linkedLibrary("z"),
+                .linkedFramework("SystemConfiguration"),
+                .unsafeFlags(["-L../target/release", "-lrdpie_core"])
+            ]
+        ),
         .testTarget(name: "RdpieCaptureTests", dependencies: ["RdpieCapture"]),
     ]
 )

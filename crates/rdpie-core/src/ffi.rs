@@ -57,6 +57,14 @@ unsafe fn owned_string(ptr: *const c_char, field: &str) -> Option<String> {
 /// null or valid NUL-terminated UTF-8.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rdpie_server_start(config: *const RdpieConfig) -> *mut RdpieServer {
+    // Best-effort: nothing in this crate ever installed a subscriber, so
+    // every `tracing::error!`/`info!` call up to this point went nowhere.
+    // Ignore the error since a second `rdpie_server_start` call after a
+    // `rdpie_server_stop` must not panic on re-init.
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .try_init();
+
     if config.is_null() {
         return core::ptr::null_mut();
     }

@@ -5,3 +5,5 @@
 spikes/locked-capture/locked-capture
 spikes/tcc-attribution/.build/
 spikes/tcc-attribution/build/
+macos/cert.pem
+macos/key.pem
