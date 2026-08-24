@@ -36,35 +36,50 @@ try source.start(configuration: CaptureConfiguration(
 signal(SIGINT) { _ in exit(0) }
 print("rdpied listening on 127.0.0.1:3389 — connect with an RDP client")
 
-var h264Encoder: H264Encoder?
+// Created eagerly, not on the first frame after a client negotiates EGFX:
+// `VTCompressionSession` setup takes long enough (~100ms on this hardware)
+// that building it lazily, right when a client is already watching for
+// video, lost the race against clients with a short patience for the first
+// graphics data — confirmed live against a mobile RDP client that closed
+// the EGFX channel ~45ms after negotiating, well before a lazily-created
+// encoder could produce its first frame.
+func freshH264Encoder() -> H264Encoder? {
+    do {
+        return try H264Encoder(width: width, height: height)
+    } catch {
+        FileHandle.standardError.write("H264Encoder creation failed: \(error)\n".data(using: .utf8)!)
+        return nil
+    }
+}
+
+var h264Encoder = freshH264Encoder()
 var wasGfxActive = false
 let encoderClockStart = DispatchTime.now()
 
 for await frame in source.frames {
     let gfxActive = bridge.isGfxActive()
-    if gfxActive && !wasGfxActive {
-        // A fresh EGFX channel (first connection, or a reconnect) means the
-        // client's decoder has no state. Discard the encoder so the next
-        // frame lazily creates a new `VTCompressionSession`, whose first
-        // output is always a keyframe carrying SPS/PPS — resuming the old
-        // session would emit a P-frame the new client can't decode.
-        h264Encoder = nil
+    if wasGfxActive && !gfxActive {
+        // The connection that was using `h264Encoder` just ended (EGFX
+        // channel closed). Pre-warm a fresh one now, while no client is
+        // waiting on it, so the next connection's first frame is a normal
+        // encode instead of paying for session creation. A fresh encoder
+        // is also required correctness-wise: a new client's decoder has no
+        // state, and resuming the old session would emit a P-frame with no
+        // reference it's ever seen — this encoder's first real `encode()`
+        // call, whenever the next connection arrives, is guaranteed to be
+        // its first ever, so it always starts with a keyframe carrying
+        // SPS/PPS.
+        h264Encoder = freshH264Encoder()
     }
     wasGfxActive = gfxActive
 
     if gfxActive {
-        let encoder: H264Encoder
-        if let existing = h264Encoder {
-            encoder = existing
-        } else {
-            do {
-                encoder = try H264Encoder(width: width, height: height)
-                h264Encoder = encoder
-            } catch {
-                FileHandle.standardError.write("H264Encoder creation failed: \(error)\n".data(using: .utf8)!)
-                bridge.submit(frame)
-                continue
-            }
+        guard let encoder = h264Encoder else {
+            // Pre-warming failed (startup or post-connection) — fall back
+            // to the raw path for this frame rather than dropping the
+            // session; view-only degradation beats a crash or a stall.
+            bridge.submit(frame)
+            continue
         }
 
         let elapsedNs = DispatchTime.now().uptimeNanoseconds - encoderClockStart.uptimeNanoseconds
