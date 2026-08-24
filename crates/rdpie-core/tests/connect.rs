@@ -62,7 +62,8 @@ async fn server_stays_up_and_accepts_a_connection() {
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async move {
-            let server = tokio::task::spawn_local(async move { run(config, stream, gfx_factory).await });
+            let server =
+                tokio::task::spawn_local(async move { run(config, stream, gfx_factory, None).await });
 
             let feeder = tokio::task::spawn_local(async move {
                 for i in 0..60u8 {
@@ -104,7 +105,7 @@ async fn a_missing_tls_identity_is_reported_not_panicked() {
         PathBuf::from("/nonexistent/key.pem"),
     );
 
-    let error = run(config, stream, gfx_factory).await.expect_err("a missing identity must be an error");
+    let error = run(config, stream, gfx_factory, None).await.expect_err("a missing identity must be an error");
     assert!(
         error.to_string().contains("TLS identity"),
         "unexpected error message: {error}"

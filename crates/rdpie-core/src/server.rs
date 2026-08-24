@@ -12,6 +12,7 @@ use ironrdp_server::{
 use crate::display::RdpieDisplay;
 use crate::frame::FrameStream;
 use crate::gfx::RdpieGfxFactory;
+use crate::input::RdpieInputHandler;
 
 /// Everything the daemon needs to start a listener.
 #[derive(Debug, Clone)]
@@ -56,12 +57,23 @@ impl ServerConfig {
 
 /// Build and run the RDP listener until it stops.
 ///
-/// Phase 1 serves display only; input arrives in Phase 3. Phase 2 adds
-/// `gfx_factory`: EGFX/AVC420 joins the raw-bitmap path built in Phase 1 as
-/// an alternative, higher-efficiency path for clients that negotiate it —
-/// the raw path is not removed, since RemoteFX/bitmap fallback is spec's
-/// permanent baseline for clients that don't support EGFX.
-pub async fn run(config: ServerConfig, frames: FrameStream, gfx_factory: RdpieGfxFactory) -> Result<()> {
+/// Phase 2 added `gfx_factory`: EGFX/AVC420 joins the raw-bitmap path built
+/// in Phase 1 as an alternative, higher-efficiency path for clients that
+/// negotiate it — the raw path is not removed, since RemoteFX/bitmap
+/// fallback is spec's permanent baseline for clients that don't support
+/// EGFX. Phase 3 adds `input_handler`: `Some` wires RDP keyboard/mouse
+/// events through to the registered FFI callback (`RdpieInputHandler`,
+/// see `input.rs`); `None` preserves the original `.with_no_input()`
+/// view-only behavior for callers that never registered one — the FFI
+/// layer passes `None` whenever Swift's `RdpieConfig.input_callback` is
+/// null, so a non-input-capable session is a deliberate config choice, not
+/// a special case threaded through here.
+pub async fn run(
+    config: ServerConfig,
+    frames: FrameStream,
+    gfx_factory: RdpieGfxFactory,
+    input_handler: Option<RdpieInputHandler>,
+) -> Result<()> {
     let identity = TlsIdentityCtx::init_from_paths(&config.cert_pem, &config.key_pem)
         .context("loading the TLS identity")?;
     let acceptor = identity.make_acceptor().context("building the TLS acceptor")?;
@@ -69,10 +81,13 @@ pub async fn run(config: ServerConfig, frames: FrameStream, gfx_factory: RdpieGf
     let validator = ExactMatchCredentialValidator::new(config.credentials());
     let display = RdpieDisplay::new(config.size, frames);
 
-    let mut server = RdpServer::builder()
-        .with_addr(config.bind)
-        .with_tls(acceptor)
-        .with_no_input()
+    let builder = RdpServer::builder().with_addr(config.bind).with_tls(acceptor);
+    let builder = match input_handler {
+        Some(handler) => builder.with_input_handler(handler),
+        None => builder.with_no_input(),
+    };
+
+    let mut server = builder
         .with_display_handler(display)
         .with_credential_validator(Some(Arc::new(validator)))
         .with_gfx_factory(Some(Box::new(gfx_factory)))
