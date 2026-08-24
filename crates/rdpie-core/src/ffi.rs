@@ -1,8 +1,9 @@
 //! C ABI consumed by the Swift daemon. This is the only module with `unsafe`.
 
-use core::ffi::{CStr, c_char};
+use core::ffi::{CStr, c_char, c_void};
 
 use crate::frame::{Frame, FrameSink, SubmitOutcome};
+use crate::input::{RdpieInputCallback, RdpieInputEvent, RdpieInputHandler};
 
 /// Opaque handle returned to Swift.
 ///
@@ -28,6 +29,35 @@ pub struct RdpieConfig {
     pub password: *const c_char,
     pub cert_pem_path: *const c_char,
     pub key_pem_path: *const c_char,
+    /// `None` (a null function pointer from C) means the client's session
+    /// is view-only — matches spec's "non-input-capable clients ... input
+    /// events are dropped" behavior, driven from the Swift side by simply
+    /// never registering a callback rather than Rust guessing capability.
+    ///
+    /// Written as `Option<unsafe extern "C" fn(...)>` with the signature
+    /// inlined, not `Option<RdpieInputCallback>` through the named alias —
+    /// confirmed by generating the header both ways: going through a named
+    /// alias defeats `cbindgen`'s `Option<T>`-to-nullable-pointer collapsing
+    /// (it only resolves `T` to a function-pointer type when the signature
+    /// is written in place), producing a broken opaque
+    /// `struct Option_RdpieInputCallback` wrapper Swift cannot assign a
+    /// callback to at all. The inline form produces a plain
+    /// `void (*input_callback)(...)` field, exactly as needed. This is a
+    /// Rust-alias-vs-cbindgen quirk only — `RdpieInputCallback` the type
+    /// alias is unaffected everywhere else in this file and remains the
+    /// right type to use for `RdpieInputHandler::new`'s parameter.
+    pub input_callback: Option<unsafe extern "C" fn(context: *mut c_void, event: *const RdpieInputEvent)>,
+    /// Opaque; passed back unchanged on every `input_callback` invocation.
+    /// Ignored when `input_callback` is `None`.
+    pub input_context: *mut c_void,
+}
+
+/// Builds the input handler `rdpie_server_start` threads into
+/// `crate::server::run`, or `None` when Swift registered no callback (a
+/// view-only session — `crate::server::run` falls back to
+/// `.with_no_input()` in that case, same as every prior phase).
+fn input_handler_from_config(config: &RdpieConfig) -> Option<RdpieInputHandler> {
+    config.input_callback.map(|callback| RdpieInputHandler::new(callback, config.input_context))
 }
 
 /// # Safety
@@ -88,6 +118,7 @@ pub unsafe extern "C" fn rdpie_server_start(config: *const RdpieConfig) -> *mut 
         cert.into(),
         key.into(),
     );
+    let input_handler = input_handler_from_config(config);
 
     let (sink, stream) = crate::frame::channel(3);
     let (gfx_factory, gfx) = crate::gfx::gfx_channel(config.width, config.height);
@@ -105,7 +136,7 @@ pub unsafe extern "C" fn rdpie_server_start(config: *const RdpieConfig) -> *mut 
             };
             runtime.block_on(async move {
                 tokio::select! {
-                    result = crate::server::run(server_config, stream, gfx_factory) => {
+                    result = crate::server::run(server_config, stream, gfx_factory, input_handler) => {
                         if let Err(error) = result {
                             tracing::error!(%error, "RDP server stopped");
                         }
@@ -400,5 +431,102 @@ mod tests {
             )
         };
         assert_eq!(rc, -1); // RdpieGfxHandle::submit_avc420_frame returns false: not ready yet
+    }
+
+    #[test]
+    fn null_input_callback_yields_no_handler() {
+        let config = RdpieConfig {
+            port: 0,
+            width: 0,
+            height: 0,
+            username: core::ptr::null(),
+            password: core::ptr::null(),
+            cert_pem_path: core::ptr::null(),
+            key_pem_path: core::ptr::null(),
+            input_callback: None,
+            input_context: core::ptr::null_mut(),
+        };
+        assert!(input_handler_from_config(&config).is_none());
+    }
+
+    #[test]
+    fn a_registered_callback_is_reachable_through_the_constructed_handler() {
+        use std::ffi::CString;
+        use std::sync::{Arc, Mutex};
+
+        use ironrdp_server::{MouseEvent, RdpServerInputHandler as _};
+
+        use crate::input::{RdpieInputEvent, RdpieInputEventKind};
+
+        unsafe extern "C" fn record(context: *mut c_void, event: *const RdpieInputEvent) {
+            let log = unsafe { &*(context as *const Mutex<Vec<RdpieInputEvent>>) };
+            log.lock().expect("test event log mutex poisoned").push(unsafe { *event });
+        }
+
+        let username = CString::new("rdpie").unwrap();
+        let password = CString::new("hunter2").unwrap();
+        let cert = CString::new("/tmp/cert.pem").unwrap();
+        let key = CString::new("/tmp/key.pem").unwrap();
+        let log: Arc<Mutex<Vec<RdpieInputEvent>>> = Arc::new(Mutex::new(Vec::new()));
+        let context = Arc::as_ptr(&log) as *mut c_void;
+
+        let config = RdpieConfig {
+            port: 3389,
+            width: 1280,
+            height: 720,
+            username: username.as_ptr(),
+            password: password.as_ptr(),
+            cert_pem_path: cert.as_ptr(),
+            key_pem_path: key.as_ptr(),
+            input_callback: Some(record),
+            input_context: context,
+        };
+
+        let mut handler =
+            input_handler_from_config(&config).expect("a non-null input_callback must build a handler");
+        handler.mouse(MouseEvent::LeftPressed);
+
+        let events = log.lock().expect("test event log mutex poisoned");
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].kind, RdpieInputEventKind::MouseLeftPressed);
+    }
+
+    #[test]
+    fn starting_with_a_null_input_callback_still_succeeds_view_only() {
+        use std::ffi::CString;
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let cert = rcgen::generate_simple_self_signed(vec!["localhost".to_owned()]).expect("self-signed cert");
+        let cert_path = dir.path().join("cert.pem");
+        let key_path = dir.path().join("key.pem");
+        std::fs::write(&cert_path, cert.cert.pem()).expect("writing cert.pem");
+        std::fs::write(&key_path, cert.signing_key.serialize_pem()).expect("writing key.pem");
+
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .expect("binding an ephemeral port")
+            .local_addr()
+            .expect("reading the ephemeral port")
+            .port();
+
+        let username = CString::new("rdpie").unwrap();
+        let password = CString::new("hunter2").unwrap();
+        let cert_c = CString::new(cert_path.to_str().expect("utf-8 temp path")).unwrap();
+        let key_c = CString::new(key_path.to_str().expect("utf-8 temp path")).unwrap();
+
+        let config = RdpieConfig {
+            port,
+            width: 640,
+            height: 480,
+            username: username.as_ptr(),
+            password: password.as_ptr(),
+            cert_pem_path: cert_c.as_ptr(),
+            key_pem_path: key_c.as_ptr(),
+            input_callback: None,
+            input_context: core::ptr::null_mut(),
+        };
+
+        let server = unsafe { rdpie_server_start(&config as *const RdpieConfig) };
+        assert!(!server.is_null(), "a null input_callback must still start a view-only server, not fail");
+        unsafe { rdpie_server_stop(server) };
     }
 }

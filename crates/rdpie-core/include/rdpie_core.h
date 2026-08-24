@@ -9,6 +9,37 @@
 #include <stdlib.h>
 
 /**
+ * Discriminant for `RdpieInputEvent`. `#[repr(C)]`, deliberately not
+ * `#[repr(u8)]`: a sized repr makes `cbindgen` emit a
+ * `#if __STDC_VERSION__ >= 202311L` conditional — a C23-typed enum plus a
+ * pre-C23 `typedef uint8_t RdpieInputEventKind` fallback — that Swift's
+ * Clang importer reports as genuinely ambiguous ("'RdpieInputEventKind' is
+ * ambiguous for type lookup"), confirmed by generating that exact header
+ * shape and compiling a matching Swift file against it. `#[repr(C)]` on a
+ * fieldless enum emits a single, unambiguous `enum` typedef instead — the
+ * same style already used for every other type in this header — and costs
+ * nothing here: this enum crosses the FFI boundary as a field inside
+ * `RdpieInputEvent`, not as a tightly packed wire format needing a 1-byte
+ * guarantee.
+ */
+typedef enum RdpieInputEventKind {
+  KeyPressed = 0,
+  KeyReleased = 1,
+  MouseMove = 2,
+  MouseLeftPressed = 3,
+  MouseLeftReleased = 4,
+  MouseRightPressed = 5,
+  MouseRightReleased = 6,
+  MouseMiddlePressed = 7,
+  MouseMiddleReleased = 8,
+  MouseButton4Pressed = 9,
+  MouseButton4Released = 10,
+  MouseButton5Pressed = 11,
+  MouseButton5Released = 12,
+  MouseVerticalScroll = 13,
+} RdpieInputEventKind;
+
+/**
  * Opaque handle returned to Swift.
  *
  * `RdpServer::run()`'s future is not `Send` — upstream holds an
@@ -17,6 +48,25 @@
  * drives the server with `block_on`, which carries no `Send` bound.
  */
 typedef struct RdpieServer RdpieServer;
+
+/**
+ * Flat event struct crossing the FFI boundary. Only the fields relevant to
+ * `kind` are meaningful for a given event; the rest are zeroed. Keyboard
+ * events carry `scancode`/`extended` (RDP PC/AT Set 1 scancode — Swift maps
+ * this to a `CGKeyCode`, this crate never touches `CGEvent`). `MouseMove`
+ * carries `x`/`y` in the single configured desktop's coordinate space.
+ * `MouseVerticalScroll` carries `scroll_delta` (positive = away from user,
+ * matching `MouseEvent::VerticalScroll`'s `value` sign — do not renormalize
+ * it here; document the passthrough).
+ */
+typedef struct RdpieInputEvent {
+  enum RdpieInputEventKind kind;
+  uint8_t scancode;
+  bool extended;
+  uint16_t x;
+  uint16_t y;
+  int16_t scroll_delta;
+} RdpieInputEvent;
 
 /**
  * Configuration passed across the ABI. All strings are NUL-terminated UTF-8
@@ -30,7 +80,45 @@ typedef struct RdpieConfig {
   const char *password;
   const char *cert_pem_path;
   const char *key_pem_path;
+  /**
+   * `None` (a null function pointer from C) means the client's session
+   * is view-only — matches spec's "non-input-capable clients ... input
+   * events are dropped" behavior, driven from the Swift side by simply
+   * never registering a callback rather than Rust guessing capability.
+   *
+   * Written as `Option<unsafe extern "C" fn(...)>` with the signature
+   * inlined, not `Option<RdpieInputCallback>` through the named alias —
+   * confirmed by generating the header both ways: going through a named
+   * alias defeats `cbindgen`'s `Option<T>`-to-nullable-pointer collapsing
+   * (it only resolves `T` to a function-pointer type when the signature
+   * is written in place), producing a broken opaque
+   * `struct Option_RdpieInputCallback` wrapper Swift cannot assign a
+   * callback to at all. The inline form produces a plain
+   * `void (*input_callback)(...)` field, exactly as needed. This is a
+   * Rust-alias-vs-cbindgen quirk only — `RdpieInputCallback` the type
+   * alias is unaffected everywhere else in this file and remains the
+   * right type to use for `RdpieInputHandler::new`'s parameter.
+   */
+  void (*input_callback)(void *context, const struct RdpieInputEvent *event);
+  /**
+   * Opaque; passed back unchanged on every `input_callback` invocation.
+   * Ignored when `input_callback` is `None`.
+   */
+  void *input_context;
 } RdpieConfig;
+
+/**
+ * Registered once at `rdpie_server_start` time. Called synchronously from
+ * the server's connection thread — must not block for meaningfully long.
+ * `context` is the opaque pointer Swift supplied in `RdpieConfig`, passed
+ * back unchanged on every call so Swift can recover object identity
+ * (`Unmanaged<T>`) across the boundary.
+ *
+ * # Safety
+ * `event` is valid only for the duration of the call. `context` must
+ * remain valid for as long as the server handle is alive.
+ */
+typedef void (*RdpieInputCallback)(void *context, const struct RdpieInputEvent *event);
 
 #ifdef __cplusplus
 extern "C" {
