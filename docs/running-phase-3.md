@@ -104,21 +104,30 @@ anything other than `1`) to stay loopback-only.
       `IOHIDSetModifierLockState`, out of scope for this phase) — CapsLock
       may not visibly toggle even though the event was injected.
 
-### Known issue: some clients disconnect during EGFX/AVC420 negotiation
+### Fixed: some clients used to disconnect during EGFX/AVC420 negotiation
 
-At least one mobile RDP client (Microsoft's official Android app) closes
-the EGFX channel and drops the connection ~45ms after accepting AVC420
-capabilities, before the daemon's first encoded frame is ready — even
-after pre-warming the H.264 encoder ahead of the connection (see
-`main.swift`'s `freshH264Encoder`). The close-timing was measured as
-constant across changes to desktop size and encoder latency, which rules
-out a simple race and points at something else in the EGFX/AVC420
-handshake this client doesn't like — root cause not yet found.
+At least one mobile RDP client (Microsoft's official Android app) was
+closing the EGFX channel and dropping the connection ~45ms after
+accepting AVC420 capabilities, before the daemon's first encoded frame
+was ready. Pre-warming the H.264 encoder (`main.swift`'s
+`freshH264Encoder`) cut that latency roughly in half but didn't change
+the client's close-timing at all — it stayed a constant ~43-47ms
+regardless of desktop size or encoder speed, which ruled out a frame-race
+explanation and pointed at the client expecting to see
+`ResetGraphics`/`CreateSurface` shortly after negotiation rather than
+whenever a captured frame happened to be ready.
 
-Confirmed via a live test that disabling the graphics pipeline entirely
-(commenting out `.with_gfx_factory(...)` in `crates/rdpie-core/src/server.rs`,
-forcing the plain bitmap/RemoteFX fallback) lets the same client connect
-and use input successfully, at much lower video quality. This isolates
-the problem to the AVC420/EGFX path specifically — it is not a general
-connection or input-path issue. Useful as a manual workaround for testing
-input on an affected client; not a fix, and not applied by default.
+Root cause: `crates/rdpie-core/src/gfx.rs` only created and mapped the
+EGFX surface lazily, bundled with the first frame submission — so a
+client got no acknowledgment at all until capture and encoding produced
+something, which could take longer than this client's patience. Fixed by
+creating and flushing the surface proactively, as soon as the client
+accepts capabilities (`GraphicsPipelineHandler::on_ready`), decoupled
+from frame timing entirely. Live-tested against the same client that
+surfaced the issue.
+
+(Disabling the graphics pipeline entirely — commenting out
+`.with_gfx_factory(...)` in `server.rs` to force the plain bitmap/RemoteFX
+fallback — was used during investigation to confirm the problem was
+AVC420/EGFX-specific, not a general connection or input-path issue. No
+longer needed now that the real fix is in.)
