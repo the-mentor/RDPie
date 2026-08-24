@@ -22,7 +22,28 @@ RDPIE_PASSWORD=hunter2 RUST_LOG=debug just run
 ```
 
 See "Testing from a real RDP client, not just loopback" below for
-`RDPIE_BIND_ALL`, the one environment variable Phase 3 adds.
+`RDPIE_BIND_ALL`, and "Matching a client's desktop size" for
+`RDPIE_WIDTH`/`RDPIE_HEIGHT`.
+
+### Matching a client's desktop size
+
+The daemon presents a fixed desktop size (1280×720 by default) — dynamic
+resize negotiation is Phase 6, not this one. A client whose real viewport
+doesn't match that size may not tolerate the mismatch gracefully: during
+Phase 3 live testing, a mobile client (1080×1920 portrait) closed its
+graphics channel and dropped the connection outright shortly after capability
+negotiation, rather than letterboxing or scrolling. If a client disconnects
+right after negotiating EGFX with no input ever exchanged, check
+`RUST_LOG=debug` output for a `Client size doesn't fit the server size`
+warning — that's this mismatch, not an input-injection bug.
+
+Override the desktop size to match a specific client:
+
+```sh
+RDPIE_PASSWORD=hunter2 RDPIE_WIDTH=1080 RDPIE_HEIGHT=1920 just run
+```
+
+Defaults to 1280×720 if unset.
 
 ### Granting Accessibility
 

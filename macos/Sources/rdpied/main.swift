@@ -15,7 +15,13 @@ let certPath = ProcessInfo.processInfo.environment["RDPIE_CERT"] ?? "./cert.pem"
 let keyPath = ProcessInfo.processInfo.environment["RDPIE_KEY"] ?? "./key.pem"
 let bindAll = ProcessInfo.processInfo.environment["RDPIE_BIND_ALL"] == "1"
 
-let width = 1280, height = 720
+// Matches whatever the RDP client actually reports as its desktop size —
+// this daemon doesn't negotiate resize (Phase 6), so a client whose real
+// viewport doesn't match this fixed size may reject the session outright
+// rather than tolerate the mismatch (observed with a mobile client's
+// portrait resolution during Phase 3 live testing).
+let width = ProcessInfo.processInfo.environment["RDPIE_WIDTH"].flatMap(Int.init) ?? 1280
+let height = ProcessInfo.processInfo.environment["RDPIE_HEIGHT"].flatMap(Int.init) ?? 720
 
 let source: CaptureSource = useSynthetic ? SyntheticCaptureSource() : ScreenCaptureKitSource()
 
