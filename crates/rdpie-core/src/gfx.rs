@@ -67,6 +67,17 @@ impl GraphicsPipelineHandler for RdpieGfxHandler {
         self.state.ready.store(true, Ordering::Release);
         tracing::info!("EGFX channel ready; client accepts AVC420 video");
     }
+
+    fn on_close(&mut self) {
+        // Mid-session DVC channel close (client disconnect, or client-driven
+        // channel teardown without a fresh connection). Reset the same state
+        // `build_server_with_handle` resets for a new connection, so a
+        // reconnect starts clean. Deliberately does not touch `state.handle`
+        // — see the module-level deadlock note.
+        self.state.ready.store(false, Ordering::Release);
+        *self.state.surface_id.lock().expect("gfx surface mutex poisoned") = None;
+        tracing::info!("EGFX channel closed");
+    }
 }
 
 impl ServerEventSender for RdpieGfxFactory {
@@ -102,6 +113,12 @@ impl RdpieGfxHandle {
     /// `false` at the start of each new connection.
     pub fn is_ready(&self) -> bool {
         self.state.ready.load(Ordering::Acquire)
+    }
+
+    /// The desktop size this handle was created with (fixed for the process
+    /// lifetime — see `gfx_channel`).
+    pub fn size(&self) -> (u16, u16) {
+        (self.state.width, self.state.height)
     }
 
     /// Push one AVC420-encoded frame to the client.
@@ -178,9 +195,19 @@ impl RdpieGfxHandle {
             }
         };
 
-        sender
+        let sent = sender
             .send(ServerEvent::Egfx(EgfxServerMessage::SendMessages { messages: svc_messages }))
-            .is_ok()
+            .is_ok();
+
+        tracing::debug!(
+            bytes = h264_data.len(),
+            surface_id = self.state.surface_id.lock().expect("gfx surface mutex poisoned").unwrap_or_default(),
+            timestamp_ms,
+            sent,
+            "submitted AVC420 frame to EGFX event loop"
+        );
+
+        sent
     }
 }
 
