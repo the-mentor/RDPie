@@ -20,8 +20,21 @@ let bindAll = ProcessInfo.processInfo.environment["RDPIE_BIND_ALL"] == "1"
 // viewport doesn't match this fixed size may reject the session outright
 // rather than tolerate the mismatch (observed with a mobile client's
 // portrait resolution during Phase 3 live testing).
-let width = ProcessInfo.processInfo.environment["RDPIE_WIDTH"].flatMap(Int.init) ?? 1280
-let height = ProcessInfo.processInfo.environment["RDPIE_HEIGHT"].flatMap(Int.init) ?? 720
+//
+// Bounded to the C ABI's `u16` width/height and kept off zero: a zero
+// desktop size divides by zero in `InputInjector`'s mouse-coordinate
+// scaling, and anything outside `UInt16`'s range traps the `RdpieConfig`
+// conversion in `RustBridge.start` instead of failing with a clear message.
+func desktopDimension(_ name: String, default fallback: Int) -> Int {
+    guard let raw = ProcessInfo.processInfo.environment[name] else { return fallback }
+    guard let value = Int(raw), (1...Int(UInt16.max)).contains(value) else {
+        FileHandle.standardError.write(Data("\(name) must be between 1 and \(UInt16.max)\n".utf8))
+        exit(2)
+    }
+    return value
+}
+let width = desktopDimension("RDPIE_WIDTH", default: 1280)
+let height = desktopDimension("RDPIE_HEIGHT", default: 720)
 
 let source: CaptureSource = useSynthetic ? SyntheticCaptureSource() : ScreenCaptureKitSource()
 
