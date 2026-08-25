@@ -95,6 +95,12 @@ func freshH264Encoder() -> H264Encoder? {
 
 var h264Encoder = freshH264Encoder()
 var wasGfxActive = false
+// Set whenever `bridge.submitH264` fails to deliver a frame (EGFX
+// backpressure, most commonly under heavy screen change) — the encoder's
+// own reference chain stays internally consistent regardless, but the
+// client's decoder now has a gap, so the next frame must be a full
+// keyframe rather than a delta against a picture the client never saw.
+var needsKeyframe = false
 // Not necessarily true — Accessibility is no longer required to start (see
 // the view-only-mode warning above) — but `hasAccessibilityPermission()` is
 // polled fresh on the first loop iteration below before this is ever read,
@@ -129,6 +135,7 @@ for await frame in source.frames {
         // its first ever, so it always starts with a keyframe carrying
         // SPS/PPS.
         h264Encoder = freshH264Encoder()
+        needsKeyframe = false
     }
     wasGfxActive = gfxActive
 
@@ -145,8 +152,9 @@ for await frame in source.frames {
         let timestampMs = UInt32(truncatingIfNeeded: elapsedNs / 1_000_000)
 
         do {
-            if let encoded = try await encoder.encode(frame, timestampMs: timestampMs) {
-                bridge.submitH264(encoded, regionWidth: frame.width, regionHeight: frame.height)
+            if let encoded = try await encoder.encode(frame, timestampMs: timestampMs, forceKeyframe: needsKeyframe) {
+                let delivered = bridge.submitH264(encoded, regionWidth: frame.width, regionHeight: frame.height)
+                needsKeyframe = !delivered
             }
         } catch {
             FileHandle.standardError.write("H.264 encode failed: \(error)\n".data(using: .utf8)!)
