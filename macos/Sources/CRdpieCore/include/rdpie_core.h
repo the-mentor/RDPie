@@ -118,6 +118,22 @@ typedef struct RdpieConfig {
    */
   void *input_context;
   /**
+   * `None` means clipboard sync is disabled for this session — Swift
+   * only omits this when it has no way to reach `NSPasteboard` at all;
+   * unlike `input_callback`, there is no permission gate on macOS for
+   * plain clipboard read/write, so real usage always registers one.
+   *
+   * Written inline, not through `RdpieClipboardCallback` the named
+   * alias, for the same `cbindgen` `Option<T>`-collapsing reason
+   * documented on `input_callback` above.
+   */
+  void (*clipboard_callback)(void *context, const uint8_t *text, uintptr_t len);
+  /**
+   * Opaque; passed back unchanged on every `clipboard_callback`
+   * invocation. Ignored when `clipboard_callback` is `None`.
+   */
+  void *clipboard_context;
+  /**
    * See `ServerConfig::new`. `false` unless the caller has deliberately
    * opted in — matches spec section 8.5's loopback-by-default mandate.
    */
@@ -214,6 +230,23 @@ int32_t rdpie_server_submit_h264_frame(struct RdpieServer *server,
                                        uint16_t region_bottom,
                                        uint8_t quantization_parameter,
                                        uint32_t timestamp_ms);
+
+/**
+ * Submit the Mac's current pasteboard text after a local copy. Never
+ * blocks. The text is only *advertised* to the client immediately
+ * (delayed rendering) — the actual bytes are sent later, only if the
+ * client pastes.
+ *
+ * Returns 0 on success, -1 on a null handle/pointer or invalid UTF-8.
+ *
+ * # Safety
+ *
+ * `server` must be a handle from `rdpie_server_start` that has not been
+ * stopped. `data` must point to at least `len` readable bytes.
+ */
+int32_t rdpie_server_submit_clipboard_text(struct RdpieServer *server,
+                                           const uint8_t *data,
+                                           uintptr_t len);
 
 /**
  * Stop the server and release the handle. Safe to call with null.

@@ -2,6 +2,7 @@
 
 use core::ffi::{CStr, c_char, c_void};
 
+use crate::clipboard::RdpieClipboardCallback;
 use crate::frame::{Frame, FrameSink, SubmitOutcome};
 use crate::input::{RdpieInputEvent, RdpieInputHandler};
 
@@ -14,6 +15,7 @@ use crate::input::{RdpieInputEvent, RdpieInputHandler};
 pub struct RdpieServer {
     pub(crate) sink: FrameSink,
     pub(crate) gfx: crate::gfx::RdpieGfxHandle,
+    pub(crate) clipboard: crate::clipboard::RdpieClipboardHandle,
     pub(crate) shutdown: Option<tokio::sync::oneshot::Sender<()>>,
     pub(crate) worker: Option<std::thread::JoinHandle<()>>,
 }
@@ -50,6 +52,18 @@ pub struct RdpieConfig {
     /// Opaque; passed back unchanged on every `input_callback` invocation.
     /// Ignored when `input_callback` is `None`.
     pub input_context: *mut c_void,
+    /// `None` means clipboard sync is disabled for this session — Swift
+    /// only omits this when it has no way to reach `NSPasteboard` at all;
+    /// unlike `input_callback`, there is no permission gate on macOS for
+    /// plain clipboard read/write, so real usage always registers one.
+    ///
+    /// Written inline, not through `RdpieClipboardCallback` the named
+    /// alias, for the same `cbindgen` `Option<T>`-collapsing reason
+    /// documented on `input_callback` above.
+    pub clipboard_callback: Option<unsafe extern "C" fn(context: *mut c_void, text: *const u8, len: usize)>,
+    /// Opaque; passed back unchanged on every `clipboard_callback`
+    /// invocation. Ignored when `clipboard_callback` is `None`.
+    pub clipboard_context: *mut c_void,
     /// See `ServerConfig::new`. `false` unless the caller has deliberately
     /// opted in — matches spec section 8.5's loopback-by-default mandate.
     pub bind_all: bool,
@@ -79,6 +93,11 @@ unsafe fn owned_string(ptr: *const c_char, field: &str) -> Option<String> {
         }
     }
 }
+
+/// A no-op callback for when Swift registered none — `submit_local_text`
+/// still needs somewhere to route the advertise-only side effect even in
+/// this case, so the channel is always created; only the callback differs.
+unsafe extern "C" fn discard_clipboard_text(_context: *mut c_void, _text: *const u8, _len: usize) {}
 
 /// Start the RDP listener on a dedicated runtime.
 ///
@@ -126,6 +145,11 @@ pub unsafe extern "C" fn rdpie_server_start(config: *const RdpieConfig) -> *mut 
 
     let (sink, stream) = crate::frame::channel(3);
     let (gfx_factory, gfx) = crate::gfx::gfx_channel(config.width, config.height);
+    let (clipboard_callback, clipboard_context) = match config.clipboard_callback {
+        Some(callback) => (callback, config.clipboard_context),
+        None => (discard_clipboard_text as RdpieClipboardCallback, core::ptr::null_mut()),
+    };
+    let (clipboard_factory, clipboard) = crate::clipboard::clipboard_channel(clipboard_callback, clipboard_context);
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
 
     let worker = std::thread::Builder::new()
@@ -140,7 +164,7 @@ pub unsafe extern "C" fn rdpie_server_start(config: *const RdpieConfig) -> *mut 
             };
             runtime.block_on(async move {
                 tokio::select! {
-                    result = crate::server::run(server_config, stream, gfx_factory, input_handler) => {
+                    result = crate::server::run(server_config, stream, gfx_factory, clipboard_factory, input_handler) => {
                         if let Err(error) = result {
                             tracing::error!(%error, "RDP server stopped");
                         }
@@ -163,6 +187,7 @@ pub unsafe extern "C" fn rdpie_server_start(config: *const RdpieConfig) -> *mut 
     Box::into_raw(Box::new(RdpieServer {
         sink,
         gfx,
+        clipboard,
         shutdown: Some(shutdown_tx),
         worker: Some(worker),
     }))
@@ -281,6 +306,35 @@ pub unsafe extern "C" fn rdpie_server_submit_h264_frame(
     }
 }
 
+/// Submit the Mac's current pasteboard text after a local copy. Never
+/// blocks. The text is only *advertised* to the client immediately
+/// (delayed rendering) — the actual bytes are sent later, only if the
+/// client pastes.
+///
+/// Returns 0 on success, -1 on a null handle/pointer or invalid UTF-8.
+///
+/// # Safety
+///
+/// `server` must be a handle from `rdpie_server_start` that has not been
+/// stopped. `data` must point to at least `len` readable bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rdpie_server_submit_clipboard_text(
+    server: *mut RdpieServer,
+    data: *const u8,
+    len: usize,
+) -> i32 {
+    if server.is_null() || data.is_null() {
+        return -1;
+    }
+    let server = unsafe { &*server };
+    let bytes = unsafe { core::slice::from_raw_parts(data, len) };
+    let Ok(text) = core::str::from_utf8(bytes) else {
+        return -1;
+    };
+    server.clipboard.submit_local_text(text.to_owned());
+    0
+}
+
 /// Stop the server and release the handle. Safe to call with null.
 ///
 /// # Safety
@@ -321,7 +375,8 @@ mod tests {
     fn submitting_a_null_buffer_is_an_error_not_a_crash() {
         let (sink, _stream) = crate::frame::channel(2);
         let (_factory, gfx) = crate::gfx::gfx_channel(2, 2);
-        let mut server = RdpieServer { sink, gfx, shutdown: None, worker: None };
+        let (_clipboard_factory, clipboard) = crate::clipboard::clipboard_channel(discard_clipboard_text, core::ptr::null_mut());
+        let mut server = RdpieServer { sink, gfx, clipboard, shutdown: None, worker: None };
         let rc = unsafe {
             rdpie_server_submit_frame(&mut server as *mut _, 2, 2, 8, core::ptr::null(), 16)
         };
@@ -332,7 +387,8 @@ mod tests {
     fn submitting_a_short_buffer_is_an_error_not_a_crash() {
         let (sink, _stream) = crate::frame::channel(2);
         let (_factory, gfx) = crate::gfx::gfx_channel(2, 2);
-        let mut server = RdpieServer { sink, gfx, shutdown: None, worker: None };
+        let (_clipboard_factory, clipboard) = crate::clipboard::clipboard_channel(discard_clipboard_text, core::ptr::null_mut());
+        let mut server = RdpieServer { sink, gfx, clipboard, shutdown: None, worker: None };
         let data = [0u8; 4]; // claims 2x2 stride 8 == 16 bytes, supplies 4
         let rc = unsafe {
             rdpie_server_submit_frame(&mut server as *mut _, 2, 2, 8, data.as_ptr(), data.len())
@@ -344,7 +400,8 @@ mod tests {
     fn a_valid_frame_is_accepted() {
         let (sink, _stream) = crate::frame::channel(2);
         let (_factory, gfx) = crate::gfx::gfx_channel(2, 2);
-        let mut server = RdpieServer { sink, gfx, shutdown: None, worker: None };
+        let (_clipboard_factory, clipboard) = crate::clipboard::clipboard_channel(discard_clipboard_text, core::ptr::null_mut());
+        let mut server = RdpieServer { sink, gfx, clipboard, shutdown: None, worker: None };
         let data = [0u8; 16];
         let rc = unsafe {
             rdpie_server_submit_frame(&mut server as *mut _, 2, 2, 8, data.as_ptr(), data.len())
@@ -366,7 +423,8 @@ mod tests {
     fn gfx_active_before_a_client_negotiates_is_false() {
         let (sink, _stream) = crate::frame::channel(2);
         let (_factory, gfx) = crate::gfx::gfx_channel(2, 2);
-        let server = RdpieServer { sink, gfx, shutdown: None, worker: None };
+        let (_clipboard_factory, clipboard) = crate::clipboard::clipboard_channel(discard_clipboard_text, core::ptr::null_mut());
+        let server = RdpieServer { sink, gfx, clipboard, shutdown: None, worker: None };
         assert!(!unsafe { rdpie_server_gfx_active(&server as *const _) });
     }
 
@@ -385,7 +443,8 @@ mod tests {
     fn submitting_a_null_h264_buffer_is_an_error_not_a_crash() {
         let (sink, _stream) = crate::frame::channel(2);
         let (_factory, gfx) = crate::gfx::gfx_channel(2, 2);
-        let mut server = RdpieServer { sink, gfx, shutdown: None, worker: None };
+        let (_clipboard_factory, clipboard) = crate::clipboard::clipboard_channel(discard_clipboard_text, core::ptr::null_mut());
+        let mut server = RdpieServer { sink, gfx, clipboard, shutdown: None, worker: None };
         let rc = unsafe {
             rdpie_server_submit_h264_frame(
                 &mut server as *mut _, core::ptr::null(), 4, 0, 0, 1, 1, 26, 0,
@@ -398,7 +457,8 @@ mod tests {
     fn submitting_an_empty_h264_buffer_is_an_error_not_a_crash() {
         let (sink, _stream) = crate::frame::channel(2);
         let (_factory, gfx) = crate::gfx::gfx_channel(2, 2);
-        let mut server = RdpieServer { sink, gfx, shutdown: None, worker: None };
+        let (_clipboard_factory, clipboard) = crate::clipboard::clipboard_channel(discard_clipboard_text, core::ptr::null_mut());
+        let mut server = RdpieServer { sink, gfx, clipboard, shutdown: None, worker: None };
         let data = [0u8; 1];
         let rc = unsafe {
             rdpie_server_submit_h264_frame(
@@ -412,7 +472,8 @@ mod tests {
     fn submitting_an_inverted_region_is_an_error_not_a_crash() {
         let (sink, _stream) = crate::frame::channel(2);
         let (_factory, gfx) = crate::gfx::gfx_channel(2, 2);
-        let mut server = RdpieServer { sink, gfx, shutdown: None, worker: None };
+        let (_clipboard_factory, clipboard) = crate::clipboard::clipboard_channel(discard_clipboard_text, core::ptr::null_mut());
+        let mut server = RdpieServer { sink, gfx, clipboard, shutdown: None, worker: None };
         let data = [0u8; 4];
         // right < left is nonsensical and must be rejected before it reaches the encoder.
         let rc = unsafe {
@@ -427,7 +488,8 @@ mod tests {
     fn submitting_h264_before_the_client_negotiates_egfx_is_rejected_not_a_crash() {
         let (sink, _stream) = crate::frame::channel(2);
         let (_factory, gfx) = crate::gfx::gfx_channel(2, 2);
-        let mut server = RdpieServer { sink, gfx, shutdown: None, worker: None };
+        let (_clipboard_factory, clipboard) = crate::clipboard::clipboard_channel(discard_clipboard_text, core::ptr::null_mut());
+        let mut server = RdpieServer { sink, gfx, clipboard, shutdown: None, worker: None };
         let data = [0u8; 4];
         let rc = unsafe {
             rdpie_server_submit_h264_frame(
@@ -449,6 +511,8 @@ mod tests {
             key_pem_path: core::ptr::null(),
             input_callback: None,
             input_context: core::ptr::null_mut(),
+            clipboard_callback: None,
+            clipboard_context: core::ptr::null_mut(),
             bind_all: false,
         };
         assert!(input_handler_from_config(&config).is_none());
@@ -485,6 +549,8 @@ mod tests {
             key_pem_path: key.as_ptr(),
             input_callback: Some(record),
             input_context: context,
+            clipboard_callback: None,
+            clipboard_context: core::ptr::null_mut(),
             bind_all: false,
         };
 
@@ -529,11 +595,41 @@ mod tests {
             key_pem_path: key_c.as_ptr(),
             input_callback: None,
             input_context: core::ptr::null_mut(),
+            clipboard_callback: None,
+            clipboard_context: core::ptr::null_mut(),
             bind_all: false,
         };
 
         let server = unsafe { rdpie_server_start(&config as *const RdpieConfig) };
         assert!(!server.is_null(), "a null input_callback must still start a view-only server, not fail");
         unsafe { rdpie_server_stop(server) };
+    }
+
+    #[test]
+    fn submitting_clipboard_text_to_a_null_server_is_an_error_not_a_crash() {
+        let data = b"hello";
+        let rc = unsafe { rdpie_server_submit_clipboard_text(core::ptr::null_mut(), data.as_ptr(), data.len()) };
+        assert_eq!(rc, -1);
+    }
+
+    #[test]
+    fn submitting_a_null_clipboard_buffer_is_an_error_not_a_crash() {
+        let (sink, _stream) = crate::frame::channel(2);
+        let (_gfx_factory, gfx) = crate::gfx::gfx_channel(2, 2);
+        let (_clipboard_factory, clipboard) = crate::clipboard::clipboard_channel(discard_clipboard_text, core::ptr::null_mut());
+        let mut server = RdpieServer { sink, gfx, clipboard, shutdown: None, worker: None };
+        let rc = unsafe { rdpie_server_submit_clipboard_text(&mut server as *mut _, core::ptr::null(), 5) };
+        assert_eq!(rc, -1);
+    }
+
+    #[test]
+    fn valid_clipboard_text_is_accepted() {
+        let (sink, _stream) = crate::frame::channel(2);
+        let (_gfx_factory, gfx) = crate::gfx::gfx_channel(2, 2);
+        let (_clipboard_factory, clipboard) = crate::clipboard::clipboard_channel(discard_clipboard_text, core::ptr::null_mut());
+        let mut server = RdpieServer { sink, gfx, clipboard, shutdown: None, worker: None };
+        let data = b"copied text";
+        let rc = unsafe { rdpie_server_submit_clipboard_text(&mut server as *mut _, data.as_ptr(), data.len()) };
+        assert_eq!(rc, 0);
     }
 }
