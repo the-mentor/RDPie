@@ -55,7 +55,17 @@ public final class ScreenCaptureKitSource: NSObject, CaptureSource, SCStreamOutp
                 config.pixelFormat = kCVPixelFormatType_32BGRA
                 config.minimumFrameInterval = CMTime(
                     value: 1, timescale: CMTimeScale(configuration.framesPerSecond))
-                config.showsCursor = true
+                // `false`, not the more obvious `true`: this daemon sends no
+                // RDP Pointer Update PDUs, so with the cursor baked into the
+                // captured pixels an RDP client shows two cursors — its own
+                // instant, locally-drawn one (tracking the physical mouse,
+                // unrelated to the network) plus this one, delayed by the
+                // full capture/encode/network/decode pipeline. A real RDP
+                // server excludes the cursor from the video for exactly this
+                // reason. Confirmed live: this was the actual source of a
+                // reported "mouse lag" that was really a duplicate, stale
+                // cursor rendered inside the video.
+                config.showsCursor = false
                 config.queueDepth = 3
 
                 let filter = SCContentFilter(display: display, excludingWindows: [])
