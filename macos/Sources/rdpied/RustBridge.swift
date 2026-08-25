@@ -7,6 +7,25 @@ enum BridgeError: Error {
     case serverFailedToStart
 }
 
+/// The C ABI's `RdpieInputCallback` cannot capture Swift closure state — it
+/// is a bare function pointer. Object identity is recovered from `context`
+/// instead: `RustBridge.start` passes `Unmanaged.passUnretained(self)
+/// .toOpaque()` as `input_context`, and this function reverses that to get
+/// back the `RustBridge` instance whose `inputInjector` should handle the
+/// event. `passUnretained`, not `passRetained`: `RustBridge` (owned by
+/// `main.swift`'s top-level `bridge` binding) already outlives the Rust
+/// server handle for the whole process lifetime, so there is no dangling-
+/// pointer risk to guard against with an extra retain.
+///
+/// `event` is valid only for the duration of this call (per the FFI
+/// contract) — `.pointee` copies the value out before handing it to
+/// `InputInjector.handle`, which is free to outlive this call.
+private func rdpieHandleInputEvent(_ context: UnsafeMutableRawPointer?, _ event: UnsafePointer<RdpieInputEvent>?) {
+    guard let context, let event else { return }
+    let bridge = Unmanaged<RustBridge>.fromOpaque(context).takeUnretainedValue()
+    bridge.inputInjector.handle(event.pointee)
+}
+
 /// Owns the Rust server handle and pushes frames into it.
 ///
 /// cbindgen emits `typedef struct RdpieServer RdpieServer;` — an opaque
@@ -18,9 +37,18 @@ final class RustBridge {
     private var handle: OpaquePointer?
     private(set) var droppedFrames = 0
 
+    /// Owned for the life of this bridge so `rdpieHandleInputEvent` always
+    /// has somewhere real to deliver events, from process startup — before
+    /// any client has connected — through to `stop()`. Constructed with the
+    /// real configured desktop size in `start`, below, once it's known;
+    /// mouse coordinates need it to scale correctly onto the real display
+    /// (see `InputInjector.scaledCursorPosition`).
+    private(set) var inputInjector = InputInjector()
+
     func start(port: UInt16, width: Int, height: Int,
                username: String, password: String,
-               certPath: String, keyPath: String) throws {
+               certPath: String, keyPath: String, bindAll: Bool = false) throws {
+        inputInjector = InputInjector(width: width, height: height)
         try username.withCString { user in
             try password.withCString { pass in
                 try certPath.withCString { cert in
@@ -32,7 +60,10 @@ final class RustBridge {
                             username: user,
                             password: pass,
                             cert_pem_path: cert,
-                            key_pem_path: key
+                            key_pem_path: key,
+                            input_callback: rdpieHandleInputEvent,
+                            input_context: Unmanaged.passUnretained(self).toOpaque(),
+                            bind_all: bindAll
                         )
                         guard let handle = rdpie_server_start(&config) else {
                             throw BridgeError.serverFailedToStart

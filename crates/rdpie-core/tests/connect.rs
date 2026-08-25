@@ -50,8 +50,9 @@ async fn server_stays_up_and_accepts_a_connection() {
     let (gfx_factory, gfx) = gfx_channel(640, 480);
     let port = free_port();
 
-    let config = ServerConfig::loopback(
+    let config = ServerConfig::new(
         port,
+        false,
         DesktopSize { width: 640, height: 480 },
         "rdpie".to_owned(),
         "hunter2".to_owned(),
@@ -62,7 +63,8 @@ async fn server_stays_up_and_accepts_a_connection() {
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async move {
-            let server = tokio::task::spawn_local(async move { run(config, stream, gfx_factory).await });
+            let server =
+                tokio::task::spawn_local(async move { run(config, stream, gfx_factory, None).await });
 
             let feeder = tokio::task::spawn_local(async move {
                 for i in 0..60u8 {
@@ -95,8 +97,9 @@ async fn server_stays_up_and_accepts_a_connection() {
 async fn a_missing_tls_identity_is_reported_not_panicked() {
     let (_sink, stream) = channel(2);
     let (gfx_factory, _gfx) = gfx_channel(640, 480);
-    let config = ServerConfig::loopback(
+    let config = ServerConfig::new(
         free_port(),
+        false,
         DesktopSize { width: 640, height: 480 },
         "rdpie".to_owned(),
         "hunter2".to_owned(),
@@ -104,7 +107,7 @@ async fn a_missing_tls_identity_is_reported_not_panicked() {
         PathBuf::from("/nonexistent/key.pem"),
     );
 
-    let error = run(config, stream, gfx_factory).await.expect_err("a missing identity must be an error");
+    let error = run(config, stream, gfx_factory, None).await.expect_err("a missing identity must be an error");
     assert!(
         error.to_string().contains("TLS identity"),
         "unexpected error message: {error}"

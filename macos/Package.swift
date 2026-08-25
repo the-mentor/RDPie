@@ -9,7 +9,7 @@ let package = Package(
         .executable(name: "rdpied", targets: ["rdpied"]),
     ],
     targets: [
-        .target(name: "RdpieCapture"),
+        .target(name: "RdpieCapture", dependencies: ["CRdpieCore"]),
         .systemLibrary(name: "CRdpieCore", path: "Sources/CRdpieCore"),
         .executableTarget(
             name: "rdpied",
@@ -20,6 +20,6 @@ let package = Package(
                 .unsafeFlags(["-L../target/release", "-lrdpie_core"])
             ]
         ),
-        .testTarget(name: "RdpieCaptureTests", dependencies: ["RdpieCapture"]),
+        .testTarget(name: "RdpieCaptureTests", dependencies: ["RdpieCapture", "CRdpieCore"]),
     ]
 )
