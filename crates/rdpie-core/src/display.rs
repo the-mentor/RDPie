@@ -1,24 +1,43 @@
 //! Adapts RDPie's frame stream to `ironrdp-server`'s display traits.
 
 use core::num::{NonZeroU16, NonZeroUsize};
+use std::sync::Arc;
 
 use anyhow::{Context as _, Result};
 use ironrdp_server::{
     BitmapUpdate, DesktopSize, DisplayUpdate, PixelFormat, RdpServerDisplay,
     RdpServerDisplayUpdates,
 };
+use tokio::sync::Mutex;
 
 use crate::frame::{Frame, FrameStream};
 
 /// Display handler backed by frames pushed from the platform capture layer.
+///
+/// `updates()` is called once per accepted connection (`ironrdp-server`
+/// calls it fresh for each new client), not once for the daemon's whole
+/// lifetime — but there is only ever one capture pipeline for the whole
+/// Mac screen, so all connections share the same underlying `FrameStream`
+/// rather than each getting their own. Wrapped in `Arc<Mutex<_>>`, not
+/// handed out by value: `FrameStream::drop` permanently closes the shared
+/// frame queue (see its doc comment), so moving it out to the first
+/// connection and letting that connection's `RdpieDisplayUpdates` own it
+/// would kill frame delivery for good the moment that first connection
+/// ended — confirmed live: a second connection to an already-running
+/// daemon failed outright ("display updates already taken") because the
+/// stream had already been taken, and would have failed differently even
+/// if that were fixed, since dropping it at the end of the first
+/// connection already closed the queue. The `Arc` only actually drops
+/// (and closes the queue for real) when `RdpieDisplay` itself does, i.e.
+/// when the daemon shuts down — not when one connection ends.
 pub struct RdpieDisplay {
     size: DesktopSize,
-    stream: Option<FrameStream>,
+    stream: Arc<Mutex<FrameStream>>,
 }
 
 impl RdpieDisplay {
     pub fn new(size: DesktopSize, stream: FrameStream) -> Self {
-        Self { size, stream: Some(stream) }
+        Self { size, stream: Arc::new(Mutex::new(stream)) }
     }
 }
 
@@ -29,14 +48,16 @@ impl RdpServerDisplay for RdpieDisplay {
     }
 
     async fn updates(&mut self) -> Result<Box<dyn RdpServerDisplayUpdates>> {
-        let stream = self.stream.take().context("display updates already taken")?;
-        Ok(Box::new(RdpieDisplayUpdates { stream }))
+        Ok(Box::new(RdpieDisplayUpdates { stream: Arc::clone(&self.stream) }))
     }
 }
 
-/// Update receiver handed to the RDP session.
+/// Update receiver handed to the RDP session. Shares the daemon's single
+/// `FrameStream` with every other connection (past or concurrent) via the
+/// `Arc<Mutex<_>>` — see `RdpieDisplay`'s doc comment for why it isn't
+/// owned outright.
 pub struct RdpieDisplayUpdates {
-    stream: FrameStream,
+    stream: Arc<Mutex<FrameStream>>,
 }
 
 fn to_bitmap(frame: Frame) -> Result<BitmapUpdate> {
@@ -70,7 +91,8 @@ impl RdpServerDisplayUpdates for RdpieDisplayUpdates {
     /// Cancel-safe, as the trait requires: `FrameStream::next` keeps its state
     /// in the shared queue, so a dropped future loses no frames.
     async fn next_update(&mut self) -> Result<Option<DisplayUpdate>> {
-        match self.stream.next().await {
+        let mut stream = self.stream.lock().await;
+        match stream.next().await {
             Some(frame) => Ok(Some(DisplayUpdate::Bitmap(to_bitmap(frame)?))),
             None => Ok(None),
         }
@@ -135,5 +157,29 @@ mod tests {
         let mut updates = display.updates().await.expect("updates");
         // A malformed frame must not panic the session; it is surfaced as an error.
         assert!(updates.next_update().await.is_err());
+    }
+
+    #[tokio::test]
+    async fn a_second_connection_gets_updates_after_the_first_one_ends() {
+        // `ironrdp-server` calls `updates()` fresh for each accepted
+        // connection, not once for the daemon's whole lifetime — a client
+        // reconnecting to an already-running daemon after a disconnect is
+        // exactly this: a second `updates()` call on the same `RdpieDisplay`,
+        // after the first connection's `RdpieDisplayUpdates` was dropped.
+        let (sink, stream) = channel(2);
+        let mut display = RdpieDisplay::new(DesktopSize { width: 2, height: 2 }, stream);
+
+        let mut first_connection = display.updates().await.expect("first connection's updates");
+        sink.submit(bgra_frame(2, 2, 0x11));
+        assert!(first_connection.next_update().await.expect("no error").is_some());
+        drop(first_connection);
+
+        let mut second_connection = display.updates().await.expect("second connection's updates");
+        sink.submit(bgra_frame(2, 2, 0x22));
+        let update = second_connection.next_update().await.expect("no error").expect("an update");
+        match update {
+            DisplayUpdate::Bitmap(bitmap) => assert!(bitmap.data.iter().all(|b| *b == 0x22)),
+            other => panic!("expected a bitmap update, got {other:?}"),
+        }
     }
 }

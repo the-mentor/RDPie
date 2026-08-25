@@ -68,6 +68,49 @@ int32_t rdpie_server_submit_frame(struct RdpieServer *server,
                                   uintptr_t len);
 
 /**
+ * Whether the connected client has finished EGFX/AVC420 capability
+ * negotiation. Swift should submit H.264 via
+ * `rdpie_server_submit_h264_frame` once this returns `true`, and fall back
+ * to raw BGRA via `rdpie_server_submit_frame` otherwise — the two paths
+ * coexist; this never disables the raw path.
+ *
+ * Returns `false` for a null handle.
+ *
+ * # Safety
+ *
+ * `server` must be a handle from `rdpie_server_start` that has not been
+ * stopped, or null.
+ */
+bool rdpie_server_gfx_active(const struct RdpieServer *server);
+
+/**
+ * Submit one AVC420-encoded H.264 frame covering a single full-frame
+ * region (`region_left`/`region_top`/`region_right`/`region_bottom` are
+ * inclusive edges, matching MS-RDPEGFX). `data` must already be Annex-B
+ * formatted (start-code-prefixed NAL units) — VideoToolbox's AVCC output
+ * needs converting to Annex-B before calling this, which happens on the
+ * Swift side, not here.
+ *
+ * Returns 0 on success, -1 on invalid arguments or a rejected frame
+ * (channel not negotiated yet, backpressure, or an encoding failure).
+ * Multi-region submission is not supported in this phase.
+ *
+ * # Safety
+ *
+ * `server` must be a handle from `rdpie_server_start` that has not been
+ * stopped. `data` must point to at least `len` readable bytes.
+ */
+int32_t rdpie_server_submit_h264_frame(struct RdpieServer *server,
+                                       const uint8_t *data,
+                                       uintptr_t len,
+                                       uint16_t region_left,
+                                       uint16_t region_top,
+                                       uint16_t region_right,
+                                       uint16_t region_bottom,
+                                       uint8_t quantization_parameter,
+                                       uint32_t timestamp_ms);
+
+/**
  * Stop the server and release the handle. Safe to call with null.
  *
  * # Safety

@@ -11,6 +11,7 @@ use ironrdp_server::{
 
 use crate::display::RdpieDisplay;
 use crate::frame::FrameStream;
+use crate::gfx::RdpieGfxFactory;
 
 /// Everything the daemon needs to start a listener.
 #[derive(Debug, Clone)]
@@ -55,8 +56,12 @@ impl ServerConfig {
 
 /// Build and run the RDP listener until it stops.
 ///
-/// Phase 1 serves display only; input arrives in Phase 3.
-pub async fn run(config: ServerConfig, frames: FrameStream) -> Result<()> {
+/// Phase 1 serves display only; input arrives in Phase 3. Phase 2 adds
+/// `gfx_factory`: EGFX/AVC420 joins the raw-bitmap path built in Phase 1 as
+/// an alternative, higher-efficiency path for clients that negotiate it —
+/// the raw path is not removed, since RemoteFX/bitmap fallback is spec's
+/// permanent baseline for clients that don't support EGFX.
+pub async fn run(config: ServerConfig, frames: FrameStream, gfx_factory: RdpieGfxFactory) -> Result<()> {
     let identity = TlsIdentityCtx::init_from_paths(&config.cert_pem, &config.key_pem)
         .context("loading the TLS identity")?;
     let acceptor = identity.make_acceptor().context("building the TLS acceptor")?;
@@ -70,6 +75,7 @@ pub async fn run(config: ServerConfig, frames: FrameStream) -> Result<()> {
         .with_no_input()
         .with_display_handler(display)
         .with_credential_validator(Some(Arc::new(validator)))
+        .with_gfx_factory(Some(Box::new(gfx_factory)))
         .build();
 
     tracing::info!(bind = %config.bind, "RDPie listening");

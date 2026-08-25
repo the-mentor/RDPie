@@ -29,3 +29,6 @@ pub mod server;
 
 pub use server::{ServerConfig, run};
 pub mod ffi;
+pub mod gfx;
+
+pub use gfx::{RdpieGfxFactory, RdpieGfxHandle, gfx_channel};

@@ -8,6 +8,7 @@ use std::time::Duration;
 
 use ironrdp_server::DesktopSize;
 use rdpie_core::frame::{Frame, channel};
+use rdpie_core::gfx::gfx_channel;
 use rdpie_core::server::{ServerConfig, run};
 
 /// Write a throwaway self-signed identity into a temp dir.
@@ -46,6 +47,7 @@ async fn server_stays_up_and_accepts_a_connection() {
     let dir = tempfile::tempdir().expect("temp dir");
     let (cert, key) = test_identity(dir.path());
     let (sink, stream) = channel(3);
+    let (gfx_factory, gfx) = gfx_channel(640, 480);
     let port = free_port();
 
     let config = ServerConfig::loopback(
@@ -57,15 +59,11 @@ async fn server_stays_up_and_accepts_a_connection() {
         key,
     );
 
-    // `run`'s future is not `Send` (upstream holds an Rc across awaits), so it
-    // cannot go to `tokio::spawn`. A LocalSet keeps it pinned to this thread —
-    // the same constraint the FFI works around with a dedicated thread.
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async move {
-            let server = tokio::task::spawn_local(async move { run(config, stream).await });
+            let server = tokio::task::spawn_local(async move { run(config, stream, gfx_factory).await });
 
-            // Feed frames so the session has something to send once connected.
             let feeder = tokio::task::spawn_local(async move {
                 for i in 0..60u8 {
                     if sink.submit(solid_frame(640, 480, i)) == rdpie_core::SubmitOutcome::Closed {
@@ -75,13 +73,17 @@ async fn server_stays_up_and_accepts_a_connection() {
                 }
             });
 
-            // Give the listener a moment to bind.
             tokio::time::sleep(Duration::from_millis(500)).await;
             assert!(!server.is_finished(), "the server exited during startup");
 
             tokio::net::TcpStream::connect(("127.0.0.1", port))
                 .await
                 .expect("the RDP listener should accept a TCP connection");
+
+            // Adding the gfx factory must not make the channel appear ready
+            // on its own — readiness only follows real client negotiation,
+            // which this test (no real RDP client) never triggers.
+            assert!(!gfx.is_ready());
 
             server.abort();
             feeder.abort();
@@ -92,6 +94,7 @@ async fn server_stays_up_and_accepts_a_connection() {
 #[tokio::test]
 async fn a_missing_tls_identity_is_reported_not_panicked() {
     let (_sink, stream) = channel(2);
+    let (gfx_factory, _gfx) = gfx_channel(640, 480);
     let config = ServerConfig::loopback(
         free_port(),
         DesktopSize { width: 640, height: 480 },
@@ -101,7 +104,7 @@ async fn a_missing_tls_identity_is_reported_not_panicked() {
         PathBuf::from("/nonexistent/key.pem"),
     );
 
-    let error = run(config, stream).await.expect_err("a missing identity must be an error");
+    let error = run(config, stream, gfx_factory).await.expect_err("a missing identity must be an error");
     assert!(
         error.to_string().contains("TLS identity"),
         "unexpected error message: {error}"
