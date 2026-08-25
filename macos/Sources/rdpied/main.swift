@@ -15,6 +15,11 @@ let useSynthetic = ProcessInfo.processInfo.environment["RDPIE_SYNTHETIC"] == "1"
 let certPath = ProcessInfo.processInfo.environment["RDPIE_CERT"] ?? "./cert.pem"
 let keyPath = ProcessInfo.processInfo.environment["RDPIE_KEY"] ?? "./key.pem"
 let bindAll = ProcessInfo.processInfo.environment["RDPIE_BIND_ALL"] == "1"
+// Escape hatch for clients that negotiate EGFX but hit trouble with the
+// H.264 path (encode/decode bugs, unsupported client codec quirks) — forces
+// every frame over the raw-bitmap fallback instead, at a real bandwidth and
+// quality cost, without needing a client that lacks EGFX support at all.
+let bitmapOnly = ProcessInfo.processInfo.environment["RDPIE_BITMAP_ONLY"] == "1"
 
 // Defaults to the Mac's actual native screen resolution (in pixels, matching
 // what ScreenCaptureKit will actually capture — not points, which would be
@@ -122,7 +127,7 @@ for await frame in source.frames {
     }
     wasAccessibilityGranted = accessibilityGranted
 
-    let gfxActive = bridge.isGfxActive()
+    let gfxActive = bridge.isGfxActive() && !bitmapOnly
     if wasGfxActive && !gfxActive {
         // The connection that was using `h264Encoder` just ended (EGFX
         // channel closed). Pre-warm a fresh one now, while no client is
