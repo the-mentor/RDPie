@@ -66,13 +66,25 @@ public final class H264Encoder {
     /// `rdpie_server_submit_h264_frame`. Returns `nil`, not an error, if
     /// VideoToolbox produced no sample for this call — a dropped frame here
     /// is recoverable, the next capture tick supplies a new one.
-    public func encode(_ frame: CapturedFrame, timestampMs: UInt32) async throws -> EncodedH264Frame? {
+    /// - Parameter forceKeyframe: pass `true` after a frame failed to reach
+    ///   the client (e.g. `RustBridge.submitH264` returned `false` because
+    ///   EGFX backpressure dropped it). This session's reference chain is
+    ///   internally consistent regardless of what actually left the
+    ///   machine, so a later delta frame would encode correctly here but
+    ///   decode against the wrong picture on the client — visible as
+    ///   smearing/color corruption until the next scheduled keyframe. A
+    ///   forced keyframe resyncs the client immediately instead of waiting
+    ///   out `maxKeyframeIntervalFrames`.
+    public func encode(_ frame: CapturedFrame, timestampMs: UInt32, forceKeyframe: Bool = false) async throws -> EncodedH264Frame? {
         guard let session else { throw H264EncoderError.sessionCreationFailed(kVTInvalidSessionErr) }
         guard let pixelBuffer = makePixelBuffer(from: frame) else {
             throw H264EncoderError.pixelBufferCreationFailed
         }
 
         let pts = CMTime(value: Int64(timestampMs), timescale: 1000)
+        let frameProperties: CFDictionary? = forceKeyframe
+            ? [kVTEncodeFrameOptionKey_ForceKeyFrame: kCFBooleanTrue] as CFDictionary
+            : nil
 
         return try await withCheckedThrowingContinuation { continuation in
             let enqueueStatus = VTCompressionSessionEncodeFrame(
@@ -80,7 +92,7 @@ public final class H264Encoder {
                 imageBuffer: pixelBuffer,
                 presentationTimeStamp: pts,
                 duration: .invalid,
-                frameProperties: nil,
+                frameProperties: frameProperties,
                 infoFlagsOut: nil
             ) { encodeStatus, _, sampleBuffer in
                 if encodeStatus != noErr {

@@ -2,12 +2,9 @@
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
-use std::sync::Arc;
 
 use anyhow::{Context as _, Result};
-use ironrdp_server::{
-    Credentials, DesktopSize, ExactMatchCredentialValidator, RdpServer, TlsIdentityCtx,
-};
+use ironrdp_server::{Credentials, DesktopSize, RdpServer, TlsIdentityCtx};
 
 use crate::display::RdpieDisplay;
 use crate::frame::FrameStream;
@@ -77,6 +74,22 @@ impl ServerConfig {
 /// layer passes `None` whenever Swift's `RdpieConfig.input_callback` is
 /// null, so a non-input-capable session is a deliberate config choice, not
 /// a special case threaded through here.
+///
+/// Phase 4 switches from plain TLS security to Hybrid (CredSSP/NLA): RDP
+/// clients negotiate `SSL | HYBRID | HYBRID_EX` and, offered only plain
+/// `SSL`, silently fall back to a non-interactive auto-logon path instead
+/// of ever prompting for RDPie's credentials — confirmed live against
+/// Windows' own client, which never showed a credential prompt at all
+/// under `.with_tls`. `.with_hybrid(acceptor, identity.pub_key)` makes the
+/// server actually offer and accept CredSSP/NTLM; `TlsIdentityCtx` already
+/// exposes the public key CredSSP's channel-binding step needs, no
+/// certificate parsing of our own required. `ExactMatchCredentialValidator`
+/// / `.with_credential_validator` is TLS-mode-only per upstream's own doc
+/// comment ("Not used for CredSSP/Hybrid connections") — `set_credentials`
+/// on the built server is the Hybrid-mode equivalent, taking the same
+/// `Credentials` value and requiring no NT-hash precomputation: upstream's
+/// CredSSP/NTLM implementation derives what it needs from the plaintext
+/// password internally.
 pub async fn run(
     config: ServerConfig,
     frames: FrameStream,
@@ -87,10 +100,11 @@ pub async fn run(
         .context("loading the TLS identity")?;
     let acceptor = identity.make_acceptor().context("building the TLS acceptor")?;
 
-    let validator = ExactMatchCredentialValidator::new(config.credentials());
     let display = RdpieDisplay::new(config.size, frames);
 
-    let builder = RdpServer::builder().with_addr(config.bind).with_tls(acceptor);
+    let builder = RdpServer::builder()
+        .with_addr(config.bind)
+        .with_hybrid(acceptor, identity.pub_key);
     let builder = match input_handler {
         Some(handler) => builder.with_input_handler(handler),
         None => builder.with_no_input(),
@@ -98,9 +112,9 @@ pub async fn run(
 
     let mut server = builder
         .with_display_handler(display)
-        .with_credential_validator(Some(Arc::new(validator)))
         .with_gfx_factory(Some(Box::new(gfx_factory)))
         .build();
+    server.set_credentials(Some(config.credentials()));
 
     tracing::info!(bind = %config.bind, "RDPie listening");
     server.run().await.context("the RDP server stopped with an error")

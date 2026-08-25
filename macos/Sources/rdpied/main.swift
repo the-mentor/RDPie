@@ -1,4 +1,5 @@
 // macos/Sources/rdpied/main.swift
+import CoreGraphics
 import Foundation
 import RdpieCapture
 
@@ -14,17 +15,30 @@ let useSynthetic = ProcessInfo.processInfo.environment["RDPIE_SYNTHETIC"] == "1"
 let certPath = ProcessInfo.processInfo.environment["RDPIE_CERT"] ?? "./cert.pem"
 let keyPath = ProcessInfo.processInfo.environment["RDPIE_KEY"] ?? "./key.pem"
 let bindAll = ProcessInfo.processInfo.environment["RDPIE_BIND_ALL"] == "1"
+// Escape hatch for clients that negotiate EGFX but hit trouble with the
+// H.264 path (encode/decode bugs, unsupported client codec quirks) — forces
+// every frame over the raw-bitmap fallback instead, at a real bandwidth and
+// quality cost, without needing a client that lacks EGFX support at all.
+let bitmapOnly = ProcessInfo.processInfo.environment["RDPIE_BITMAP_ONLY"] == "1"
 
-// Matches whatever the RDP client actually reports as its desktop size —
-// this daemon doesn't negotiate resize (Phase 6), so a client whose real
-// viewport doesn't match this fixed size may reject the session outright
-// rather than tolerate the mismatch (observed with a mobile client's
-// portrait resolution during Phase 3 live testing).
+// Defaults to the Mac's actual native screen resolution (in pixels, matching
+// what ScreenCaptureKit will actually capture — not points, which would be
+// wrong on a Retina display) rather than an arbitrary fixed literal: serving
+// a size unrelated to the real screen stretched/blurred the image, since the
+// RDP client scales whatever aspect ratio it's given to fit its own window.
+// This daemon still doesn't negotiate resize with the client (Phase 6), so a
+// client whose own viewport doesn't match this size may reject the session
+// outright rather than tolerate the mismatch (observed with a mobile
+// client's portrait resolution during Phase 3 live testing) — RDPIE_WIDTH/
+// RDPIE_HEIGHT remain available to override for exactly that case.
 //
-// Bounded to the C ABI's `u16` width/height and kept off zero: a zero
-// desktop size divides by zero in `InputInjector`'s mouse-coordinate
-// scaling, and anything outside `UInt16`'s range traps the `RdpieConfig`
-// conversion in `RustBridge.start` instead of failing with a clear message.
+// An override is bounded to the C ABI's `u16` width/height and kept off
+// zero: a zero desktop size divides by zero in `InputInjector`'s mouse-
+// coordinate scaling, and anything outside `UInt16`'s range traps the
+// `RdpieConfig` conversion in `RustBridge.start` instead of failing with a
+// clear message. The computed native-resolution default needs no such
+// check — `CGDisplayPixelsWide`/`High` never return a value outside that
+// range for a real display.
 func desktopDimension(_ name: String, default fallback: Int) -> Int {
     guard let raw = ProcessInfo.processInfo.environment[name] else { return fallback }
     guard let value = Int(raw), (1...Int(UInt16.max)).contains(value) else {
@@ -33,8 +47,8 @@ func desktopDimension(_ name: String, default fallback: Int) -> Int {
     }
     return value
 }
-let width = desktopDimension("RDPIE_WIDTH", default: 1280)
-let height = desktopDimension("RDPIE_HEIGHT", default: 720)
+let width = desktopDimension("RDPIE_WIDTH", default: Int(CGDisplayPixelsWide(CGMainDisplayID())))
+let height = desktopDimension("RDPIE_HEIGHT", default: Int(CGDisplayPixelsHigh(CGMainDisplayID())))
 
 let source: CaptureSource = useSynthetic ? SyntheticCaptureSource() : ScreenCaptureKitSource()
 
@@ -86,6 +100,12 @@ func freshH264Encoder() -> H264Encoder? {
 
 var h264Encoder = freshH264Encoder()
 var wasGfxActive = false
+// Set whenever `bridge.submitH264` fails to deliver a frame (EGFX
+// backpressure, most commonly under heavy screen change) — the encoder's
+// own reference chain stays internally consistent regardless, but the
+// client's decoder now has a gap, so the next frame must be a full
+// keyframe rather than a delta against a picture the client never saw.
+var needsKeyframe = false
 // Not necessarily true — Accessibility is no longer required to start (see
 // the view-only-mode warning above) — but `hasAccessibilityPermission()` is
 // polled fresh on the first loop iteration below before this is ever read,
@@ -107,7 +127,7 @@ for await frame in source.frames {
     }
     wasAccessibilityGranted = accessibilityGranted
 
-    let gfxActive = bridge.isGfxActive()
+    let gfxActive = bridge.isGfxActive() && !bitmapOnly
     if wasGfxActive && !gfxActive {
         // The connection that was using `h264Encoder` just ended (EGFX
         // channel closed). Pre-warm a fresh one now, while no client is
@@ -120,6 +140,7 @@ for await frame in source.frames {
         // its first ever, so it always starts with a keyframe carrying
         // SPS/PPS.
         h264Encoder = freshH264Encoder()
+        needsKeyframe = false
     }
     wasGfxActive = gfxActive
 
@@ -136,8 +157,9 @@ for await frame in source.frames {
         let timestampMs = UInt32(truncatingIfNeeded: elapsedNs / 1_000_000)
 
         do {
-            if let encoded = try await encoder.encode(frame, timestampMs: timestampMs) {
-                bridge.submitH264(encoded, regionWidth: frame.width, regionHeight: frame.height)
+            if let encoded = try await encoder.encode(frame, timestampMs: timestampMs, forceKeyframe: needsKeyframe) {
+                let delivered = bridge.submitH264(encoded, regionWidth: frame.width, regionHeight: frame.height)
+                needsKeyframe = !delivered
             }
         } catch {
             FileHandle.standardError.write("H.264 encode failed: \(error)\n".data(using: .utf8)!)
