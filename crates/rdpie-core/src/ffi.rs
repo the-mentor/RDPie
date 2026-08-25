@@ -632,4 +632,19 @@ mod tests {
         let rc = unsafe { rdpie_server_submit_clipboard_text(&mut server as *mut _, data.as_ptr(), data.len()) };
         assert_eq!(rc, 0);
     }
+
+    #[test]
+    fn a_remote_paste_with_no_registered_callback_invokes_the_discard_no_op_without_panicking() {
+        use ironrdp_cliprdr::backend::CliprdrBackendFactory as _;
+        use ironrdp_cliprdr::pdu::FormatDataResponse;
+
+        let (clipboard_factory, _clipboard) =
+            crate::clipboard::clipboard_channel(discard_clipboard_text, core::ptr::null_mut());
+        let mut backend = clipboard_factory.build_cliprdr_backend();
+
+        // Drives a real inbound message through `discard_clipboard_text` via
+        // `ClipboardState::invoke_callback` -- the path a Swift-less session
+        // (no clipboard_callback registered) takes on an actual remote paste.
+        backend.on_format_data_response(FormatDataResponse::new_unicode_string("from the remote"));
+    }
 }
