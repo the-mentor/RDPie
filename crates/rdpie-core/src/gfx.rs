@@ -254,12 +254,18 @@ impl RdpieGfxHandle {
         let (channel_id, dvc_messages) = {
             let mut server = handle.lock().expect("GfxServerHandle mutex poisoned");
 
-            let surface_id = self
-                .state
-                .surface_id
-                .lock()
-                .expect("gfx surface mutex poisoned")
-                .expect("ensure_surface guarantees this is set on success");
+            // Not guaranteed by the check above anymore: `on_close` (a
+            // completely ordinary client disconnect, racing this call from
+            // a separate OS thread via FFI) clears `surface_id` without
+            // taking `handle`'s lock, by design — see the module-level
+            // deadlock note. A `None` here means exactly that race landed
+            // between the check above and this point; drop the frame
+            // instead of panicking. Panicking here would poison this
+            // mutex and abort the whole process (no `catch_unwind` across
+            // the FFI boundary this is called through).
+            let Some(surface_id) = *self.state.surface_id.lock().expect("gfx surface mutex poisoned") else {
+                return false;
+            };
 
             if server.send_avc420_frame(surface_id, h264_data, regions, timestamp_ms).is_none() {
                 return false;
