@@ -35,3 +35,6 @@ pub use gfx::{RdpieGfxFactory, RdpieGfxHandle, gfx_channel};
 pub mod input;
 
 pub use input::{RdpieInputCallback, RdpieInputEvent, RdpieInputEventKind, RdpieInputHandler};
+pub mod clipboard;
+
+pub use clipboard::{RdpieClipboardCallback, RdpieClipboardFactory, RdpieClipboardHandle, clipboard_channel};
