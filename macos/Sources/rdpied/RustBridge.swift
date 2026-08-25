@@ -1,4 +1,5 @@
 // macos/Sources/rdpied/RustBridge.swift
+import AppKit
 import Foundation
 import CRdpieCore
 import RdpieCapture
@@ -26,6 +27,20 @@ private func rdpieHandleInputEvent(_ context: UnsafeMutableRawPointer?, _ event:
     bridge.inputInjector.handle(event.pointee)
 }
 
+/// Same object-identity-via-context trick as `rdpieHandleInputEvent` — see
+/// its doc comment for why `passUnretained` is correct here too.
+///
+/// `text`/`len` are valid only for the duration of this call (per the FFI
+/// contract) — build the `String` before returning, don't retain the
+/// pointer.
+private func rdpieHandleClipboardText(_ context: UnsafeMutableRawPointer?, _ text: UnsafePointer<UInt8>?, _ len: UInt) {
+    guard let context, let text else { return }
+    let bridge = Unmanaged<RustBridge>.fromOpaque(context).takeUnretainedValue()
+    let data = Data(bytes: text, count: Int(len))
+    guard let string = String(data: data, encoding: .utf8) else { return }
+    bridge.writeRemoteClipboardText(string)
+}
+
 /// Owns the Rust server handle and pushes frames into it.
 ///
 /// cbindgen emits `typedef struct RdpieServer RdpieServer;` — an opaque
@@ -45,6 +60,20 @@ final class RustBridge {
     /// (see `InputInjector.scaledCursorPosition`).
     private(set) var inputInjector = InputInjector()
 
+    /// Set right after `writeRemoteClipboardText` writes remote-sourced
+    /// text to the pasteboard, to the `changeCount` that write produced.
+    /// `main.swift`'s poll loop compares against this so it never mistakes
+    /// our own write for a new local copy and bounces it straight back to
+    /// the remote (an echo loop).
+    private(set) var lastKnownClipboardChangeCount = NSPasteboard.general.changeCount
+
+    fileprivate func writeRemoteClipboardText(_ text: String) {
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(text, forType: .string)
+        lastKnownClipboardChangeCount = pasteboard.changeCount
+    }
+
     func start(port: UInt16, width: Int, height: Int,
                username: String, password: String,
                certPath: String, keyPath: String, bindAll: Bool = false) throws {
@@ -63,6 +92,8 @@ final class RustBridge {
                             key_pem_path: key,
                             input_callback: rdpieHandleInputEvent,
                             input_context: Unmanaged.passUnretained(self).toOpaque(),
+                            clipboard_callback: rdpieHandleClipboardText,
+                            clipboard_context: Unmanaged.passUnretained(self).toOpaque(),
                             bind_all: bindAll
                         )
                         guard let handle = rdpie_server_start(&config) else {
@@ -122,6 +153,19 @@ final class RustBridge {
                 0, 0, UInt16(regionWidth - 1), UInt16(regionHeight - 1),
                 Self.defaultQuantizationParameter,
                 frame.timestampMs) == 0
+        }
+    }
+
+    /// Called whenever `main.swift`'s poll loop notices the pasteboard
+    /// changed. Advertises the new text to the client (delayed rendering
+    /// — see `rdpie_server_submit_clipboard_text`'s doc comment); the
+    /// actual bytes only cross the wire later, if the client pastes.
+    func submitClipboardText(_ text: String) {
+        guard let handle else { return }
+        let data = Data(text.utf8)
+        data.withUnsafeBytes { (buffer: UnsafeRawBufferPointer) in
+            guard let base = buffer.baseAddress?.assumingMemoryBound(to: UInt8.self) else { return }
+            _ = rdpie_server_submit_clipboard_text(handle, base, UInt(buffer.count))
         }
     }
 
