@@ -60,18 +60,31 @@ final class RustBridge {
     /// (see `InputInjector.scaledCursorPosition`).
     private(set) var inputInjector = InputInjector()
 
+    /// Same lock pattern as `ScreenCaptureKitSource`'s `lock` property:
+    /// `writeRemoteClipboardText` runs on the Rust worker thread (invoked
+    /// from the clipboard callback), while `main.swift`'s poll loop reads
+    /// `lastKnownClipboardChangeCount` on the main capture-loop thread.
+    private let clipboardChangeCountLock = NSLock()
+
     /// Set right after `writeRemoteClipboardText` writes remote-sourced
     /// text to the pasteboard, to the `changeCount` that write produced.
     /// `main.swift`'s poll loop compares against this so it never mistakes
     /// our own write for a new local copy and bounces it straight back to
     /// the remote (an echo loop).
-    private(set) var lastKnownClipboardChangeCount = NSPasteboard.general.changeCount
+    private var _lastKnownClipboardChangeCount = NSPasteboard.general.changeCount
+    var lastKnownClipboardChangeCount: Int {
+        clipboardChangeCountLock.lock()
+        defer { clipboardChangeCountLock.unlock() }
+        return _lastKnownClipboardChangeCount
+    }
 
     fileprivate func writeRemoteClipboardText(_ text: String) {
         let pasteboard = NSPasteboard.general
         pasteboard.clearContents()
         pasteboard.setString(text, forType: .string)
-        lastKnownClipboardChangeCount = pasteboard.changeCount
+        clipboardChangeCountLock.lock()
+        _lastKnownClipboardChangeCount = pasteboard.changeCount
+        clipboardChangeCountLock.unlock()
     }
 
     func start(port: UInt16, width: Int, height: Int,
