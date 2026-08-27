@@ -31,11 +31,11 @@ RDPIE_PASSWORD=<password> RDPIE_USERNAME=<username> just run
 
 ## Verification checklist for a live pass
 
-- [ ] Connect with a real RDP client that has clipboard redirection enabled
+- [x] Connect with a real RDP client that has clipboard redirection enabled
       (mstsc: Show Options → Local Resources → Clipboard, checked).
-- [ ] Copy text on the Mac, paste it on the remote client. Confirm it
+- [x] Copy text on the Mac, paste it on the remote client. Confirm it
       arrives correctly.
-- [ ] Copy text on the remote client, paste it on the Mac. Confirm it
+- [x] Copy text on the remote client, paste it on the Mac. Confirm it
       arrives correctly.
 - [ ] Copy text on the Mac, then immediately copy something *different* on
       the Mac before pasting anywhere — confirm the remote receives the
