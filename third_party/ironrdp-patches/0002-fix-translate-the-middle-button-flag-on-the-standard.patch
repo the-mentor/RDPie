@@ -1,0 +1,62 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Avri Chen-Roth <11185446+the-mentor@users.noreply.github.com>
+Date: Thu, 27 Aug 2026 17:01:13 +0300
+Subject: [PATCH] fix: translate the middle-button flag on the standard pointer
+ PDU
+
+impl From<MousePdu> for MouseEvent checked PointerFlags::LEFT_BUTTON,
+RIGHT_BUTTON, and VERTICAL_WHEEL but never MIDDLE_BUTTON_OR_WHEEL
+(PTRFLAGS_BUTTON3), so a middle click sent via the standard TS_POINTER_EVENT
+PDU -- the path virtually every RDP client uses for ordinary clicks -- fell
+through to the final else branch and was silently reinterpreted as a plain
+mouse move. The sibling relative-movement and Advanced Input PDU conversions
+already handled this flag correctly; only the main path was missing it.
+---
+ crates/ironrdp-server/src/handler.rs | 30 ++++++++++++++++++++++++++++
+ 1 file changed, 30 insertions(+)
+
+diff --git a/crates/ironrdp-server/src/handler.rs b/crates/ironrdp-server/src/handler.rs
+index eae6e330..7b805f7f 100644
+--- a/crates/ironrdp-server/src/handler.rs
++++ b/crates/ironrdp-server/src/handler.rs
+@@ -160,6 +160,12 @@ impl From<MousePdu> for MouseEvent {
+             } else {
+                 MouseEvent::RightReleased
+             }
++        } else if value.flags.contains(PointerFlags::MIDDLE_BUTTON_OR_WHEEL) {
++            if value.flags.contains(PointerFlags::DOWN) {
++                MouseEvent::MiddlePressed
++            } else {
++                MouseEvent::MiddleReleased
++            }
+         } else if value.flags.contains(PointerFlags::VERTICAL_WHEEL) {
+             MouseEvent::VerticalScroll {
+                 value: value.number_of_wheel_rotation_units,
+@@ -274,3 +280,27 @@ impl From<ainput::MousePdu> for MouseEvent {
+         }
+     }
+ }
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn mouse_pdu_middle_button_down_and_up_convert_to_middle_pressed_and_released() {
++        let down = MousePdu {
++            flags: PointerFlags::MIDDLE_BUTTON_OR_WHEEL | PointerFlags::DOWN,
++            number_of_wheel_rotation_units: 0,
++            x_position: 0,
++            y_position: 0,
++        };
++        assert!(matches!(MouseEvent::from(down), MouseEvent::MiddlePressed));
++
++        let up = MousePdu {
++            flags: PointerFlags::MIDDLE_BUTTON_OR_WHEEL,
++            number_of_wheel_rotation_units: 0,
++            x_position: 0,
++            y_position: 0,
++        };
++        assert!(matches!(MouseEvent::from(up), MouseEvent::MiddleReleased));
++    }
++}

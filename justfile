@@ -4,6 +4,27 @@ export PATH := env_var('HOME') + "/.cargo/bin:" + env_var('PATH')
 default:
     @just --list
 
+# Resets the ironrdp submodule to its pinned upstream commit, then applies
+# this repo's local patches on top (third_party/ironrdp-patches/) via `git
+# am`. Safe to re-run any time -- always resets first, so a stale or
+# half-applied state never lingers. Run this after `git submodule update`
+# (including the first `--init`) and before building: the submodule itself
+# stays pinned to a clean, fetchable upstream commit; these patches are what
+# actually put the local fixes (e.g. TCP_NODELAY, middle-click) in the tree
+# you build against. See third_party/ironrdp-patches/README.md.
+ironrdp-patches:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    pin=$(git rev-parse HEAD:third_party/ironrdp)
+    cd third_party/ironrdp
+    git am --abort >/dev/null 2>&1 || true
+    git checkout -f "$pin"
+    shopt -s nullglob
+    patches=(../ironrdp-patches/*.patch)
+    if [ ${#patches[@]} -gt 0 ]; then
+        git am "${patches[@]}"
+    fi
+
 # Build the Rust core (release) and regenerate the C header for Swift.
 build-rust:
     cargo build -p rdpie-core --release

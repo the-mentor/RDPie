@@ -1,0 +1,33 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Avri Chen-Roth <11185446+the-mentor@users.noreply.github.com>
+Date: Tue, 25 Aug 2026 03:07:09 +0300
+Subject: [PATCH] fix: set TCP_NODELAY on accepted server connections
+
+Nagle's algorithm was left enabled on every accepted socket, delaying
+small writes (input-event handling, incremental screen updates) by
+tens of milliseconds each. This protocol is built from exactly that
+kind of small, latency-sensitive write, so the default costs real
+round-trip latency for no benefit.
+---
+ crates/ironrdp-server/src/server.rs | 8 ++++++++
+ 1 file changed, 8 insertions(+)
+
+diff --git a/crates/ironrdp-server/src/server.rs b/crates/ironrdp-server/src/server.rs
+index 612a629f..9b164c57 100644
+--- a/crates/ironrdp-server/src/server.rs
++++ b/crates/ironrdp-server/src/server.rs
+@@ -958,6 +958,14 @@ impl RdpServer {
+                     debug!(?peer, "Received connection");
+                     drop(ev_receiver);
+ 
++                    // Without this, Nagle's algorithm coalesces the small,
++                    // latency-sensitive writes this protocol is built from
++                    // (input-event handling, incremental screen updates),
++                    // adding tens of milliseconds per round trip.
++                    if let Err(error) = stream.set_nodelay(true) {
++                        debug!(?error, "Failed to set TCP_NODELAY");
++                    }
++
+                     let accepted = self.connection_handler
+                         .as_mut()
+                         .is_none_or(|h| h.on_accept(peer));
