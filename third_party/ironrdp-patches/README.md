@@ -24,8 +24,11 @@ just ironrdp-patches
 ```
 
 Resets the submodule to its pinned commit and applies every `*.patch` file
-here, in order. Safe to re-run any time. Run it after any
-`git submodule update` (including the first `--init`) and before building.
+here, in order. Safe to re-run any time -- a no-op if the checkout already
+looks patched, so it's cheap enough that `just build` runs it automatically
+before every build; you only need to run it by hand after a
+`git submodule update` if you want the submodule in its patched state
+without also running a build.
 
 ## Resetting
 

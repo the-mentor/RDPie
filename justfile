@@ -20,23 +20,41 @@ ironrdp-patches-reset:
 
 # Resets the ironrdp submodule (see ironrdp-patches-reset above), then
 # applies this repo's local patches on top (third_party/ironrdp-patches/)
-# via `git am`. Safe to re-run any time. Run this after `git submodule
-# update` (including the first `--init`) and before building: the submodule
-# itself stays pinned to a clean, fetchable upstream commit; these patches
-# are what actually put the local fixes (e.g. TCP_NODELAY, middle-click) in
-# the tree you build against. See third_party/ironrdp-patches/README.md.
-ironrdp-patches: ironrdp-patches-reset
+# via `git am`. Run this after `git submodule update` (including the first
+# `--init`) and before building: the submodule itself stays pinned to a
+# clean, fetchable upstream commit; these patches are what actually put the
+# local fixes (e.g. TCP_NODELAY, middle-click) in the tree you build
+# against. See third_party/ironrdp-patches/README.md.
+#
+# Skips the reset+reapply entirely when the checkout already looks patched
+# (same number of commits past the pin as there are patch files, no
+# uncommitted changes) -- this runs on every `just build` (see build-rust
+# below), and `git checkout -f` always rewrites file mtimes regardless of
+# content, which would otherwise force a full ironrdp-server/rdpie-core
+# recompile on every single build even with nothing to actually redo.
+ironrdp-patches:
     #!/usr/bin/env bash
     set -euo pipefail
+    pin=$(git rev-parse HEAD:third_party/ironrdp)
     cd third_party/ironrdp
     shopt -s nullglob
     patches=(../ironrdp-patches/*.patch)
+    already_applied=$(git rev-list --count "$pin"..HEAD 2>/dev/null || echo -1)
+    if [ "$already_applied" = "${#patches[@]}" ] && git diff --quiet && git diff --cached --quiet; then
+        exit 0
+    fi
+    git am --abort >/dev/null 2>&1 || true
+    git checkout -f "$pin"
     if [ ${#patches[@]} -gt 0 ]; then
         git am "${patches[@]}"
     fi
 
 # Build the Rust core (release) and regenerate the C header for Swift.
-build-rust:
+# Depends on ironrdp-patches so the submodule is always in its patched
+# state before compiling -- a plain `cargo build` against a freshly reset
+# or freshly cloned submodule would silently build without the local
+# fixes, with no error to signal it.
+build-rust: ironrdp-patches
     cargo build -p rdpie-core --release
     cbindgen --config crates/rdpie-core/cbindgen.toml --crate rdpie-core \
         --output macos/Sources/CRdpieCore/include/rdpie_core.h
