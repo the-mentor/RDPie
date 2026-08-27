@@ -112,6 +112,35 @@ final class InputInjectorTests: XCTestCase {
         XCTAssertEqual(injector.droppedEventCount, 0)
     }
 
+    func testMouseMoveWhileLeftButtonHeldDispatchesALeftMouseDraggedEvent() {
+        let (injector, posted) = recordingInjector()
+        injector.handle(RdpieInputEvent(kind: MouseLeftPressed, scancode: 0, extended: false, x: 0, y: 0, scroll_delta: 0))
+        injector.handle(RdpieInputEvent(kind: MouseMove, scancode: 0, extended: false, x: 100, y: 100, scroll_delta: 0))
+        XCTAssertEqual(posted().map(\.type), [.leftMouseDown, .leftMouseDragged])
+    }
+
+    func testMouseMoveAfterLeftButtonReleasedGoesBackToPlainMouseMoved() {
+        let (injector, posted) = recordingInjector()
+        injector.handle(RdpieInputEvent(kind: MouseLeftPressed, scancode: 0, extended: false, x: 0, y: 0, scroll_delta: 0))
+        injector.handle(RdpieInputEvent(kind: MouseLeftReleased, scancode: 0, extended: false, x: 0, y: 0, scroll_delta: 0))
+        injector.handle(RdpieInputEvent(kind: MouseMove, scancode: 0, extended: false, x: 100, y: 100, scroll_delta: 0))
+        XCTAssertEqual(posted().map(\.type), [.leftMouseDown, .leftMouseUp, .mouseMoved])
+    }
+
+    func testMouseMoveWhileRightButtonHeldDispatchesARightMouseDraggedEvent() {
+        let (injector, posted) = recordingInjector()
+        injector.handle(RdpieInputEvent(kind: MouseRightPressed, scancode: 0, extended: false, x: 0, y: 0, scroll_delta: 0))
+        injector.handle(RdpieInputEvent(kind: MouseMove, scancode: 0, extended: false, x: 100, y: 100, scroll_delta: 0))
+        XCTAssertEqual(posted().map(\.type), [.rightMouseDown, .rightMouseDragged])
+    }
+
+    func testMouseMoveWhileMiddleButtonHeldDispatchesAnOtherMouseDraggedEvent() {
+        let (injector, posted) = recordingInjector()
+        injector.handle(RdpieInputEvent(kind: MouseMiddlePressed, scancode: 0, extended: false, x: 0, y: 0, scroll_delta: 0))
+        injector.handle(RdpieInputEvent(kind: MouseMove, scancode: 0, extended: false, x: 100, y: 100, scroll_delta: 0))
+        XCTAssertEqual(posted().map(\.type), [.otherMouseDown, .otherMouseDragged])
+    }
+
     func testKeyPressedDispatchesAKeyDownEventForTheMappedScancode() {
         let (injector, posted) = recordingInjector()
         injector.handle(RdpieInputEvent(kind: KeyPressed, scancode: 0x1E /* kVK_ANSI_A */, extended: false, x: 0, y: 0, scroll_delta: 0))
