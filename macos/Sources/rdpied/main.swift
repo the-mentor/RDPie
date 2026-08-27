@@ -1,4 +1,5 @@
 // macos/Sources/rdpied/main.swift
+import AppKit
 import CoreGraphics
 import Foundation
 import RdpieCapture
@@ -106,6 +107,12 @@ var wasGfxActive = false
 // client's decoder now has a gap, so the next frame must be a full
 // keyframe rather than a delta against a picture the client never saw.
 var needsKeyframe = false
+// Local pasteboard polling: AppKit has no clipboard-change notification,
+// only a monotonically increasing changeCount to compare against. Reusing
+// this loop (already running ~30x/sec while a client is connected) avoids
+// a second timer for what is otherwise a single cheap integer comparison
+// per iteration.
+var lastPolledClipboardChangeCount = NSPasteboard.general.changeCount
 // Not necessarily true — Accessibility is no longer required to start (see
 // the view-only-mode warning above) — but `hasAccessibilityPermission()` is
 // polled fresh on the first loop iteration below before this is ever read,
@@ -126,6 +133,16 @@ for await frame in source.frames {
             Data("Accessibility permission revoked — continuing in view-only mode.\n".utf8))
     }
     wasAccessibilityGranted = accessibilityGranted
+
+    let pasteboard = NSPasteboard.general
+    if pasteboard.changeCount != lastPolledClipboardChangeCount {
+        lastPolledClipboardChangeCount = pasteboard.changeCount
+        // Skip re-advertising a change this process itself just wrote —
+        // see RustBridge.writeRemoteClipboardText's doc comment.
+        if pasteboard.changeCount != bridge.lastKnownClipboardChangeCount, let text = pasteboard.string(forType: .string) {
+            bridge.submitClipboardText(text)
+        }
+    }
 
     let gfxActive = bridge.isGfxActive() && !bitmapOnly
     if wasGfxActive && !gfxActive {

@@ -13,6 +13,8 @@ crate-type = ["rlib", "staticlib"]
 [dependencies]
 ironrdp-server = { version = "0.13", features = ["helper", "egfx"] }
 ironrdp-egfx = "0.3"
+ironrdp-cliprdr = "0.7"
+ironrdp-core = "0.2"
 ironrdp-dvc = "0.8"
 ironrdp-svc = "0.8"
 anyhow = "1"

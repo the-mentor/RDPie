@@ -6,6 +6,7 @@ use std::path::PathBuf;
 use anyhow::{Context as _, Result};
 use ironrdp_server::{Credentials, DesktopSize, RdpServer, TlsIdentityCtx};
 
+use crate::clipboard::RdpieClipboardFactory;
 use crate::display::RdpieDisplay;
 use crate::frame::FrameStream;
 use crate::gfx::RdpieGfxFactory;
@@ -90,10 +91,17 @@ impl ServerConfig {
 /// `Credentials` value and requiring no NT-hash precomputation: upstream's
 /// CredSSP/NTLM implementation derives what it needs from the plaintext
 /// password internally.
+///
+/// Phase 5 adds `clipboard_factory`: always registered (unlike
+/// `input_handler`, clipboard sync has no permission gate on macOS worth
+/// modeling as an `Option` here) — `.with_cliprdr_factory(...)` makes the
+/// server support CLIPRDR whenever the connecting client opens that
+/// channel, exactly like EGFX only activates when a client negotiates it.
 pub async fn run(
     config: ServerConfig,
     frames: FrameStream,
     gfx_factory: RdpieGfxFactory,
+    clipboard_factory: RdpieClipboardFactory,
     input_handler: Option<RdpieInputHandler>,
 ) -> Result<()> {
     let identity = TlsIdentityCtx::init_from_paths(&config.cert_pem, &config.key_pem)
@@ -113,6 +121,7 @@ pub async fn run(
     let mut server = builder
         .with_display_handler(display)
         .with_gfx_factory(Some(Box::new(gfx_factory)))
+        .with_cliprdr_factory(Some(Box::new(clipboard_factory)))
         .build();
     server.set_credentials(Some(config.credentials()));
 

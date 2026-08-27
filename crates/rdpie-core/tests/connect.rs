@@ -7,6 +7,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use ironrdp_server::DesktopSize;
+use rdpie_core::clipboard::clipboard_channel;
 use rdpie_core::frame::{Frame, channel};
 use rdpie_core::gfx::gfx_channel;
 use rdpie_core::server::{ServerConfig, run};
@@ -42,12 +43,15 @@ fn solid_frame(width: u16, height: u16, value: u8) -> Frame {
     Frame { width, height, stride, data: vec![value; stride * usize::from(height)] }
 }
 
+unsafe extern "C" fn noop_clipboard_callback(_context: *mut core::ffi::c_void, _text: *const u8, _len: usize) {}
+
 #[tokio::test]
 async fn server_stays_up_and_accepts_a_connection() {
     let dir = tempfile::tempdir().expect("temp dir");
     let (cert, key) = test_identity(dir.path());
     let (sink, stream) = channel(3);
     let (gfx_factory, gfx) = gfx_channel(640, 480);
+    let (clipboard_factory, _clipboard) = clipboard_channel(noop_clipboard_callback, core::ptr::null_mut());
     let port = free_port();
 
     let config = ServerConfig::new(
@@ -63,8 +67,9 @@ async fn server_stays_up_and_accepts_a_connection() {
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async move {
-            let server =
-                tokio::task::spawn_local(async move { run(config, stream, gfx_factory, None).await });
+            let server = tokio::task::spawn_local(async move {
+                run(config, stream, gfx_factory, clipboard_factory, None).await
+            });
 
             let feeder = tokio::task::spawn_local(async move {
                 for i in 0..60u8 {
@@ -97,6 +102,7 @@ async fn server_stays_up_and_accepts_a_connection() {
 async fn a_missing_tls_identity_is_reported_not_panicked() {
     let (_sink, stream) = channel(2);
     let (gfx_factory, _gfx) = gfx_channel(640, 480);
+    let (clipboard_factory, _clipboard) = clipboard_channel(noop_clipboard_callback, core::ptr::null_mut());
     let config = ServerConfig::new(
         free_port(),
         false,
@@ -107,7 +113,9 @@ async fn a_missing_tls_identity_is_reported_not_panicked() {
         PathBuf::from("/nonexistent/key.pem"),
     );
 
-    let error = run(config, stream, gfx_factory, None).await.expect_err("a missing identity must be an error");
+    let error = run(config, stream, gfx_factory, clipboard_factory, None)
+        .await
+        .expect_err("a missing identity must be an error");
     assert!(
         error.to_string().contains("TLS identity"),
         "unexpected error message: {error}"

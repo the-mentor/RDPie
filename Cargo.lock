@@ -2299,6 +2299,8 @@ dependencies = [
  "anyhow",
  "async-trait",
  "bytes",
+ "ironrdp-cliprdr",
+ "ironrdp-core",
  "ironrdp-dvc",
  "ironrdp-egfx",
  "ironrdp-pdu",
