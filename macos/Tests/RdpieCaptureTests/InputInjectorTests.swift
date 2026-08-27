@@ -1,5 +1,6 @@
 import XCTest
 import ApplicationServices // CGEvent/CGEventType/CGPoint/CGRect — same import InputInjector.swift uses
+import Carbon.HIToolbox // kVK_* modifier key code constants only
 import CRdpieCore
 @testable import RdpieCapture
 
@@ -23,6 +24,7 @@ final class InputInjectorTests: XCTestCase {
         MouseButton5Pressed,
         MouseButton5Released,
         MouseVerticalScroll,
+        ReleaseAllModifiers,
     ]
 
     private func sampleEvent(kind: RdpieInputEventKind) -> RdpieInputEvent {
@@ -172,6 +174,27 @@ final class InputInjectorTests: XCTestCase {
         injector.handle(RdpieInputEvent(kind: MouseButton4Pressed, scancode: 0, extended: false, x: 0, y: 0, scroll_delta: 0))
         XCTAssertEqual(posted().map(\.type), [.otherMouseDown])
         XCTAssertEqual(posted().first?.getIntegerValueField(.mouseEventButtonNumber), 3)
+    }
+
+    func testReleaseAllModifiersDispatchesAKeyUpForEveryModifierKey() {
+        let (injector, posted) = recordingInjector()
+        injector.handle(RdpieInputEvent(kind: ReleaseAllModifiers, scancode: 0, extended: false, x: 0, y: 0, scroll_delta: 0))
+
+        let events = posted()
+        XCTAssertEqual(events.count, 8)
+        // Modifier keys report as `.flagsChanged`, not `.keyUp`/`.keyDown`,
+        // regardless of the `keyDown:` argument used to construct them --
+        // confirmed against a live `CGEvent(keyboardEventSource:...)` call,
+        // not assumed.
+        XCTAssertTrue(events.allSatisfy { $0.type == .flagsChanged })
+        let keyCodes = Set(events.map { $0.getIntegerValueField(.keyboardEventKeycode) })
+        let expectedKeyCodes: Set<Int64> = [
+            Int64(kVK_Control), Int64(kVK_RightControl),
+            Int64(kVK_Shift), Int64(kVK_RightShift),
+            Int64(kVK_Command), Int64(kVK_RightCommand),
+            Int64(kVK_Option), Int64(kVK_RightOption),
+        ]
+        XCTAssertEqual(keyCodes, expectedKeyCodes)
     }
 
     func testMouseVerticalScrollDispatchesAScrollWheelEvent() {

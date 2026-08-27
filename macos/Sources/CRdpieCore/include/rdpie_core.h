@@ -37,6 +37,18 @@ typedef enum RdpieInputEventKind {
   MouseButton5Pressed = 11,
   MouseButton5Released = 12,
   MouseVerticalScroll = 13,
+  /**
+   * Forces every modifier key (Control, Shift, Command, Option, both
+   * sides) up on the Mac, regardless of what this handler thinks their
+   * state is. Emitted on `KeyboardEvent::Synchronize` -- the client's
+   * signal that keyboard focus returned to the RDP session, which is
+   * also the only moment a held-but-never-released modifier (the client
+   * OS ate the key-up because focus left the RDP window while it was
+   * down) can be noticed and corrected. Posting a key-up for a modifier
+   * that was never actually down is a no-op, so this is safe to fire on
+   * every resync rather than only when something is actually stuck.
+   */
+  ReleaseAllModifiers = 14,
 } RdpieInputEventKind;
 
 /**
