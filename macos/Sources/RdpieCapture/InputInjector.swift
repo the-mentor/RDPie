@@ -1,6 +1,8 @@
 import Foundation
 import ApplicationServices // AXIsProcessTrusted + CGEvent; re-exports CoreGraphics,
                             // matching spikes/cgevent-injection/main.swift's import list
+import Carbon.HIToolbox    // kVK_* modifier key code constants only, same header
+                            // ScancodeMap.swift already reads them from
 import CRdpieCore
 
 /// Turns one `RdpieInputEvent` from the Rust core into a real, system-wide
@@ -150,6 +152,8 @@ public final class InputInjector {
             heldButton = nil
             dispatch(CGEvent(mouseEventSource: source, mouseType: .otherMouseUp,
                               mouseCursorPosition: currentCursorLocation(), mouseButton: Self.button5))
+        case ReleaseAllModifiers:
+            releaseAllModifiers()
         case MouseVerticalScroll:
             // `CGMouseButton` only declares 3 named cases (left/right/center
             // = 0/1/2) — there is no `CGEventType` case for a 4th/5th
@@ -198,6 +202,29 @@ public final class InputInjector {
         case .left: return .leftMouseDragged
         case .right: return .rightMouseDragged
         default: return .otherMouseDragged
+        }
+    }
+
+    /// Every modifier key, both sides. Posting a key-up for one that isn't
+    /// actually down is a harmless no-op (the same reason typing on the
+    /// real keyboard also clears a stuck one) -- so this always posts all
+    /// eight rather than trying to track which one is actually stuck.
+    private static let modifierKeyCodes: [CGKeyCode] = [
+        CGKeyCode(kVK_Control), CGKeyCode(kVK_RightControl),
+        CGKeyCode(kVK_Shift), CGKeyCode(kVK_RightShift),
+        CGKeyCode(kVK_Command), CGKeyCode(kVK_RightCommand),
+        CGKeyCode(kVK_Option), CGKeyCode(kVK_RightOption),
+    ]
+
+    /// See `RdpieInputEventKind.ReleaseAllModifiers`'s doc comment: fired on
+    /// every RDP Synchronize event (the client's "keyboard focus returned"
+    /// signal) to clear a modifier left stuck down because its key-up never
+    /// made it across the wire -- e.g. the user alt-tabbed away from the
+    /// client window while holding Ctrl or Cmd, and the client's own OS
+    /// captured that key-up instead of sending it as an RDP event.
+    private func releaseAllModifiers() {
+        for keyCode in Self.modifierKeyCodes {
+            dispatch(CGEvent(keyboardEventSource: source, virtualKey: keyCode, keyDown: false))
         }
     }
 
