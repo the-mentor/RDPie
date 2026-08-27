@@ -4,21 +4,31 @@ export PATH := env_var('HOME') + "/.cargo/bin:" + env_var('PATH')
 default:
     @just --list
 
-# Resets the ironrdp submodule to its pinned upstream commit, then applies
-# this repo's local patches on top (third_party/ironrdp-patches/) via `git
-# am`. Safe to re-run any time -- always resets first, so a stale or
-# half-applied state never lingers. Run this after `git submodule update`
-# (including the first `--init`) and before building: the submodule itself
-# stays pinned to a clean, fetchable upstream commit; these patches are what
-# actually put the local fixes (e.g. TCP_NODELAY, middle-click) in the tree
-# you build against. See third_party/ironrdp-patches/README.md.
-ironrdp-patches:
+# Resets the ironrdp submodule to its pinned upstream commit, discarding any
+# applied patches (or other local edits) in the checkout. Safe to re-run any
+# time; aborts a half-finished `git am` first so a previous failed patch
+# apply never lingers. Useful on its own to get back to a clean, vanilla
+# upstream tree -- e.g. to confirm a bug isn't caused by a local patch, or
+# per third_party/ironrdp-patches/README.md's "Adding a new patch" step 3.
+ironrdp-patches-reset:
     #!/usr/bin/env bash
     set -euo pipefail
     pin=$(git rev-parse HEAD:third_party/ironrdp)
     cd third_party/ironrdp
     git am --abort >/dev/null 2>&1 || true
     git checkout -f "$pin"
+
+# Resets the ironrdp submodule (see ironrdp-patches-reset above), then
+# applies this repo's local patches on top (third_party/ironrdp-patches/)
+# via `git am`. Safe to re-run any time. Run this after `git submodule
+# update` (including the first `--init`) and before building: the submodule
+# itself stays pinned to a clean, fetchable upstream commit; these patches
+# are what actually put the local fixes (e.g. TCP_NODELAY, middle-click) in
+# the tree you build against. See third_party/ironrdp-patches/README.md.
+ironrdp-patches: ironrdp-patches-reset
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd third_party/ironrdp
     shopt -s nullglob
     patches=(../ironrdp-patches/*.patch)
     if [ ${#patches[@]} -gt 0 ]; then
