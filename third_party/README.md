@@ -22,6 +22,19 @@ exists for two reasons:
    `RdpServerDisplay`, `RdpServerDisplayUpdates` and `RdpServerInputHandler`
    correctly means reading upstream source regularly.
 
+### Local patches
+
+The submodule itself always stays pinned to a clean, unmodified upstream
+commit — never a commit created by editing the checkout in place. A commit
+made directly in this local checkout would only exist on this machine, and
+`git submodule update` on any other clone (or CI) would fail trying to
+fetch it from upstream, which never received it.
+
+Local fixes that haven't made it upstream yet instead live as patch files
+in `third_party/ironrdp-patches/`, applied on top of the pin at build time
+via `just ironrdp-patches`. See that directory's own README for how to add
+one and how to eventually upstream it.
+
 Note that as of 0.13.0 the fork rationale above is largely historical: upstream
 now ships an `egfx` feature with `send_avc420_frame()` / `send_avc444_frame()`,
 so the capability MacRDP forked for is available without patching. The submodule
@@ -57,4 +70,9 @@ cd ../..
 git add third_party/ironrdp
 ```
 
-Then bump the `ironrdp-server` version requirement to match.
+Then bump the `ironrdp-server` version requirement to match, and check
+whether each file in `third_party/ironrdp-patches/` still applies cleanly
+against the new pin (`just ironrdp-patches` will fail loudly on the first
+one that doesn't) — a patch merged upstream between the old and new pin no
+longer needs to be carried at all; delete it. Rebase any patch that
+conflicts against the new commit before committing.
