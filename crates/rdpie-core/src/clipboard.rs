@@ -167,7 +167,17 @@ impl CliprdrBackend for RdpieClipboardBackend {
         ClipboardGeneralCapabilityFlags::empty()
     }
 
-    fn on_ready(&mut self) {}
+    // `on_request_format_list` fires when the CLIENT role receives a Monitor
+    // Ready PDU -- we're the server, and it's the server that sends Monitor
+    // Ready, so that hook never fires here. The server-side equivalent is
+    // `on_ready`, invoked once the client's own Format List PDU has been
+    // processed during channel initialization (see ironrdp-cliprdr's
+    // `handle_format_list`). Route both to the same advertise-if-cached
+    // logic: `on_request_format_list` is still a required trait method and
+    // stays harmless if a client ever exercises it directly.
+    fn on_ready(&mut self) {
+        self.on_request_format_list();
+    }
 
     fn on_request_format_list(&mut self) {
         if self.state.local_text.lock().expect("clipboard local_text mutex poisoned").is_some() {
@@ -186,6 +196,12 @@ impl CliprdrBackend for RdpieClipboardBackend {
 
     fn on_format_data_request(&mut self, request: FormatDataRequest) {
         if request.format != ClipboardFormatId::CF_UNICODETEXT {
+            // MS-RDPECLIP 3.1.5.2.3 requires a Format Data Response for
+            // every request, even a failing one -- a conforming client only
+            // ever asks for CF_UNICODETEXT (the only format we advertise),
+            // but a client that asks for anything else must not be left
+            // waiting on a response that never comes.
+            self.state.send(ClipboardMessage::SendFormatData(FormatDataResponse::new_error()));
             return;
         }
         self.state.respond_with_local_text();
@@ -280,6 +296,38 @@ mod tests {
     }
 
     #[test]
+    fn on_ready_with_no_local_text_sends_nothing() {
+        let (mut factory, _handle, _log) = factory_with_log();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        factory.set_sender(tx);
+        let mut backend = factory.build_cliprdr_backend();
+
+        backend.on_ready();
+
+        assert!(drain_clipboard_messages(&mut rx).is_empty());
+    }
+
+    #[test]
+    fn on_ready_after_a_local_copy_advertises() {
+        // This is the server-side initial-sync hook: `on_request_format_list`
+        // only fires for the client role (see its doc comment on the trait
+        // impl above), so `on_ready` is what must pick up a pre-connection
+        // copy and offer it once the channel finishes initializing.
+        let (mut factory, handle, _log) = factory_with_log();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        factory.set_sender(tx);
+        handle.submit_local_text("copied before the client connected".to_owned());
+        drain_clipboard_messages(&mut rx); // discard the advertise from submit_local_text itself
+
+        let mut backend = factory.build_cliprdr_backend();
+        backend.on_ready();
+
+        let messages = drain_clipboard_messages(&mut rx);
+        assert_eq!(messages.len(), 1);
+        assert!(matches!(&messages[0], ClipboardMessage::SendInitiateCopy(_)));
+    }
+
+    #[test]
     fn on_request_format_list_after_a_local_copy_re_advertises() {
         let (mut factory, handle, _log) = factory_with_log();
         let (tx, mut rx) = mpsc::unbounded_channel();
@@ -316,7 +364,7 @@ mod tests {
     }
 
     #[test]
-    fn format_data_request_for_a_non_text_format_is_ignored() {
+    fn format_data_request_for_a_non_text_format_gets_an_error_response() {
         let (mut factory, handle, _log) = factory_with_log();
         let (tx, mut rx) = mpsc::unbounded_channel();
         factory.set_sender(tx);
@@ -326,10 +374,16 @@ mod tests {
         let mut backend = factory.build_cliprdr_backend();
         // CF_BITMAP -- a real, well-known non-text format id -- is never
         // something this backend advertises, so a request for it is a
-        // client protocol edge case, not something to answer.
+        // client protocol edge case -- but MS-RDPECLIP still requires a
+        // response, or the client's paste hangs waiting for one.
         backend.on_format_data_request(FormatDataRequest { format: ClipboardFormatId(2) });
 
-        assert!(drain_clipboard_messages(&mut rx).is_empty());
+        let messages = drain_clipboard_messages(&mut rx);
+        assert_eq!(messages.len(), 1);
+        let ClipboardMessage::SendFormatData(response) = &messages[0] else {
+            panic!("expected SendFormatData, got {:?}", messages[0]);
+        };
+        assert!(response.is_error());
     }
 
     #[test]
