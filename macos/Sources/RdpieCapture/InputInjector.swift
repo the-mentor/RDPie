@@ -36,6 +36,15 @@ public final class InputInjector {
     private let hasAccessibility: () -> Bool
     private let post: (CGEvent?) -> Void
 
+    /// The mouse button currently held, if any -- set on a `*Pressed` event,
+    /// cleared on the matching `*Released` event. `MouseMove` consults this
+    /// to post a `*Dragged` `CGEventType` instead of a plain `.mouseMoved`:
+    /// macOS drag gestures (text selection, window dragging, canvas tools)
+    /// key off the event's *type* being one of the Dragged variants, not off
+    /// a button separately being down, so a held-button move posted as
+    /// `.mouseMoved` is invisible to them as a drag.
+    private var heldButton: CGMouseButton?
+
     /// - Parameters:
     ///   - width/height: the configured RDP desktop size, in the same space
     ///     `RdpieInputEvent.x`/`.y` arrive in. Defaults match `main.swift`'s
@@ -93,37 +102,52 @@ public final class InputInjector {
         case KeyReleased:
             postKey(event, keyDown: false)
         case MouseMove:
-            dispatch(CGEvent(mouseEventSource: source, mouseType: .mouseMoved,
-                              mouseCursorPosition: scaledCursorPosition(event),
-                              mouseButton: .left))
+            let position = scaledCursorPosition(event)
+            if let heldButton {
+                dispatch(CGEvent(mouseEventSource: source, mouseType: Self.dragEventType(for: heldButton),
+                                  mouseCursorPosition: position, mouseButton: heldButton))
+            } else {
+                dispatch(CGEvent(mouseEventSource: source, mouseType: .mouseMoved,
+                                  mouseCursorPosition: position, mouseButton: .left))
+            }
         case MouseLeftPressed:
+            heldButton = .left
             dispatch(CGEvent(mouseEventSource: source, mouseType: .leftMouseDown,
                               mouseCursorPosition: currentCursorLocation(), mouseButton: .left))
         case MouseLeftReleased:
+            heldButton = nil
             dispatch(CGEvent(mouseEventSource: source, mouseType: .leftMouseUp,
                               mouseCursorPosition: currentCursorLocation(), mouseButton: .left))
         case MouseRightPressed:
+            heldButton = .right
             dispatch(CGEvent(mouseEventSource: source, mouseType: .rightMouseDown,
                               mouseCursorPosition: currentCursorLocation(), mouseButton: .right))
         case MouseRightReleased:
+            heldButton = nil
             dispatch(CGEvent(mouseEventSource: source, mouseType: .rightMouseUp,
                               mouseCursorPosition: currentCursorLocation(), mouseButton: .right))
         case MouseMiddlePressed:
+            heldButton = .center
             dispatch(CGEvent(mouseEventSource: source, mouseType: .otherMouseDown,
                               mouseCursorPosition: currentCursorLocation(), mouseButton: .center))
         case MouseMiddleReleased:
+            heldButton = nil
             dispatch(CGEvent(mouseEventSource: source, mouseType: .otherMouseUp,
                               mouseCursorPosition: currentCursorLocation(), mouseButton: .center))
         case MouseButton4Pressed:
+            heldButton = Self.button4
             dispatch(CGEvent(mouseEventSource: source, mouseType: .otherMouseDown,
                               mouseCursorPosition: currentCursorLocation(), mouseButton: Self.button4))
         case MouseButton4Released:
+            heldButton = nil
             dispatch(CGEvent(mouseEventSource: source, mouseType: .otherMouseUp,
                               mouseCursorPosition: currentCursorLocation(), mouseButton: Self.button4))
         case MouseButton5Pressed:
+            heldButton = Self.button5
             dispatch(CGEvent(mouseEventSource: source, mouseType: .otherMouseDown,
                               mouseCursorPosition: currentCursorLocation(), mouseButton: Self.button5))
         case MouseButton5Released:
+            heldButton = nil
             dispatch(CGEvent(mouseEventSource: source, mouseType: .otherMouseUp,
                               mouseCursorPosition: currentCursorLocation(), mouseButton: Self.button5))
         case MouseVerticalScroll:
@@ -165,6 +189,17 @@ public final class InputInjector {
 
     private static let button4 = CGMouseButton(rawValue: 3)!
     private static let button5 = CGMouseButton(rawValue: 4)!
+
+    /// `CGMouseButton` only names `.left`/`.right`/`.center` -- button4/5
+    /// fall through to `.otherMouseDragged` alongside the middle button,
+    /// same as their non-drag `.otherMouseDown`/`Up` handling above.
+    private static func dragEventType(for button: CGMouseButton) -> CGEventType {
+        switch button {
+        case .left: return .leftMouseDragged
+        case .right: return .rightMouseDragged
+        default: return .otherMouseDragged
+        }
+    }
 
     private func postKey(_ event: RdpieInputEvent, keyDown: Bool) {
         guard let keyCode = ScancodeMap.lookup(scancode: event.scancode, extended: event.extended) else {
