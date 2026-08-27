@@ -24,8 +24,22 @@ just ironrdp-patches
 ```
 
 Resets the submodule to its pinned commit and applies every `*.patch` file
-here, in order. Safe to re-run any time. Run it after any
-`git submodule update` (including the first `--init`) and before building.
+here, in order. Safe to re-run any time -- a no-op if the checkout already
+looks patched, so it's cheap enough that `just build` runs it automatically
+before every build; you only need to run it by hand after a
+`git submodule update` if you want the submodule in its patched state
+without also running a build.
+
+## Resetting
+
+```sh
+just ironrdp-patches-reset
+```
+
+Resets the submodule to its pinned commit *without* reapplying the
+patches -- back to a plain, vanilla upstream checkout. Useful to confirm a
+bug isn't caused by one of these patches, or as step 3 below when adding a
+new one. `just ironrdp-patches` itself is just this plus `git am`.
 
 ## Adding a new patch
 
@@ -34,9 +48,8 @@ here, in order. Safe to re-run any time. Run it after any
    ideally becomes the commit message of the eventual upstream PR).
 2. `git format-patch --zero-commit --no-signature -1 <commit> --start-number N -o third_party/ironrdp-patches`,
    where `N` is one more than the highest existing patch number.
-3. Reset the submodule back to its pinned commit (`git checkout <pin>`) so
-   the parent repo's gitlink stays on the clean upstream commit, not on
-   your local patch commit.
+3. `just ironrdp-patches-reset`, so the parent repo's gitlink stays on the
+   clean upstream commit, not on your local patch commit.
 4. Commit the new `.patch` file (and nothing else under
    `third_party/ironrdp`) in the parent repo.
 
